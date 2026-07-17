@@ -2,13 +2,14 @@ import os
 import json
 import uvicorn
 
-from dotenv     import load_dotenv
-from fastapi    import FastAPI
-from typing     import Optional
-from typing     import Dict
-from typing     import Any
-from contextlib import asynccontextmanager
-from typing     import AsyncIterator
+from dotenv        import load_dotenv
+from fastapi       import FastAPI
+from typing        import Optional
+from typing        import Dict
+from typing        import Any
+from contextlib    import asynccontextmanager
+from typing        import AsyncIterator
+from redis.asyncio import Redis
 
 from common.database.postgresql.postgresql_pool_manager  import PostgresqlPoolManager
 from common.cache.redis_stream.redis_stream_client       import RedisStreamClient
@@ -33,6 +34,12 @@ from app.llm.chat.chat_query_service                     import ChatQueryService
 from common.database.postgresql.postgresql_configuration import PostgresqlConfiguration
 from common.cache.redis_stream.redis_configuration       import RedisConfiguration
 from app.llm.agent.model_configuration                   import ModelConfiguration
+from app.orchestrator.agent.fake_compiled_graph          import FakeCompiledGraph
+from app.orchestrator.api.orchestrator_api_router        import OrchestratorAPIRouter
+from app.orchestrator.service.chat_history_service       import ChatHistoryService
+from app.orchestrator.service.chunk_flush_service        import ChunkFlushService
+from app.orchestrator.service.graph_stream_executor      import GraphStreamExecutor
+from app.orchestrator.service.redis_chunk_buffer         import RedisChunkBuffer
 
 class ServerApplication:
     def __init__(self) -> None:
@@ -106,9 +113,20 @@ class ServerApplication:
             self.job_task_repository
         )
         self.chat_api_router = ChatAPIRouter(self.chat_query_service)
-        self.application     = FastAPI(title = "LLM Job Service", lifespan = self.lifespan_async)
+
+        # 오케스트레이터 도메인 (Redis 버퍼링 → llm_* 스키마 벌크 저장, 저장은 llm 리포지토리 재사용)
+        # redis.asyncio 클라이언트는 첫 명령 시점에 지연 연결되므로 여기서 생성해도 안전하다 (연결 확인은 lifespan ping)
+        self.orchestrator_redis_client = ServerApplication._create_orchestrator_redis_client()
+        self.redis_chunk_buffer        = RedisChunkBuffer(self.orchestrator_redis_client)
+        self.chat_history_service      = ChatHistoryService(self.job_repository, self.job_message_repository)
+        self.chunk_flush_service       = ChunkFlushService(self.postgresql_pool_manager, self.redis_chunk_buffer, self.job_repository, self.job_message_repository, self.chat_thread_repository)
+        self.graph_stream_executor     = GraphStreamExecutor(self.redis_chunk_buffer)
+        self.orchestrator_api_router   = OrchestratorAPIRouter(FakeCompiledGraph(), self.uuid_v7_generator, self.chat_history_service, self.chunk_flush_service, self.graph_stream_executor, self.redis_chunk_buffer)  # 실제 서비스에서는 workflow.compile() 결과로 교체
+
+        self.application = FastAPI(title = "LLM Job Service", lifespan = self.lifespan_async)
         self.application.include_router(self.llm_api_router.get_router())
         self.application.include_router(self.chat_api_router.get_router())
+        self.application.include_router(self.orchestrator_api_router.get_router())
 
     @staticmethod
     def _get_boolean(environment_variable_name : str, default_value : bool) -> bool:
@@ -176,6 +194,20 @@ class ServerApplication:
             extra_body_dictionary     = ServerApplication._get_optional_dictionary("MODEL_EXTRA_BODY")
         )
 
+    @staticmethod
+    def _create_orchestrator_redis_client() -> Redis:
+        # 오케스트레이터 청크 버퍼용 redis.asyncio 클라이언트 (기존 REDIS_* 환경변수 재사용)
+        redis_configuration = ServerApplication._get_redis_configuration()
+        return Redis(
+            host                   = redis_configuration.host,
+            port                   = redis_configuration.port,
+            db                     = redis_configuration.database_index,
+            password               = redis_configuration.password,
+            decode_responses       = True,
+            socket_timeout         = redis_configuration.socket_timeout_second_count,
+            socket_connect_timeout = redis_configuration.socket_connect_timeout_second_count
+        )
+
     @asynccontextmanager
     async def lifespan_async(self, fast_api : FastAPI) -> AsyncIterator[None]:
         await self.postgresql_pool_manager.open_async()
@@ -184,8 +216,10 @@ class ServerApplication:
             await self.redis_stream_client.open_async()
             await self.redis_stream_client.ping_async()
             await self.job_reaper.start_async()
+            await self.orchestrator_redis_client.ping()
             yield
         finally:
+            await self.orchestrator_redis_client.aclose()
             await self.job_reaper.stop_async()
             await self.job_manager.shutdown_async()
             await self.redis_stream_client.close_async()
@@ -196,5 +230,4 @@ class ServerApplication:
 
 if __name__ == "__main__":
     server_application = ServerApplication()
-    uvicorn.run(server_application.get_application(), host = os.getenv("SERVER_HOST", "0.0.0.0"), port = int(os.getenv("SERVER_PORT", "8000")))
-
+    uvicorn.run(server_application.get_application(), host = os.getenv("SERVER_HOST", "localhost"), port = int(os.getenv("SERVER_PORT", "8000")))

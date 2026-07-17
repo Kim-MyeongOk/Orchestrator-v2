@@ -1,5 +1,5 @@
 [project]
-name = "testproject"
+name = "vLLM_Orchestrator_Deep_Agent"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -21,4 +21,4 @@ dependencies = [
 ]
 
 [tool.uv]
-cache-dir = "d:\\.uv-cache"
+cache-dir = "C:\\.uv-cache"
