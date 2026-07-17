@@ -183,6 +183,11 @@ ALTER TABLE llm_job_message ADD COLUMN IF NOT EXISTS tool_call_id VARCHAR(200);
 ALTER TABLE llm_job_message ADD COLUMN IF NOT EXISTS agent_name VARCHAR(200);
 ALTER TABLE llm_job_message ADD COLUMN IF NOT EXISTS is_root_message BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS idx_llm_job_message_task   ON llm_job_message (run_id, task_id, seq_first);
+
+-- 오케스트레이터 도메인 통합 컬럼 (orch_run / orch_message 흡수)
+ALTER TABLE llm_job         ADD COLUMN IF NOT EXISTS final_output JSONB;
+ALTER TABLE llm_job         ADD COLUMN IF NOT EXISTS aggregated_event JSONB;
+ALTER TABLE llm_job_message ADD COLUMN IF NOT EXISTS files_metadata JSONB;
 """
 
     def __init__(self, postgresql_pool_manager : PostgresqlPoolManager) -> None:

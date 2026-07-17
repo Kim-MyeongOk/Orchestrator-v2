@@ -61,6 +61,7 @@ INSERT INTO llm_job_message
     tool_call_list,
     usage,
     response_metadata,
+    files_metadata,
     seq_first,
     seq_last,
     created_at
@@ -86,7 +87,8 @@ VALUES
     $17,
     $18,
     $19,
-    $20
+    $20,
+    $21
 )
 ON CONFLICT (run_id, ns_path, message_id) DO UPDATE
 SET
@@ -100,6 +102,7 @@ SET
     message_type      = COALESCE(EXCLUDED.message_type, llm_job_message.message_type),
     tool_call_id      = COALESCE(EXCLUDED.tool_call_id, llm_job_message.tool_call_id),
     agent_name        = COALESCE(EXCLUDED.agent_name, llm_job_message.agent_name),
+    files_metadata    = COALESCE(EXCLUDED.files_metadata, llm_job_message.files_metadata),
     is_root_message   = EXCLUDED.is_root_message,
     seq_first         = LEAST(llm_job_message.seq_first, EXCLUDED.seq_first),
     seq_last          = GREATEST(llm_job_message.seq_last, EXCLUDED.seq_last),
@@ -122,6 +125,7 @@ SET
             merged_message_dictionary.get("tool_call_list"),
             merged_message_dictionary.get("usage"),
             merged_message_dictionary.get("response_metadata"),
+            merged_message_dictionary.get("files_metadata"),
             merged_message_dictionary["seq_first"],
             merged_message_dictionary["seq_last"],
             JobMessageRepository._get_created_at(merged_message_dictionary)
@@ -176,6 +180,12 @@ SET
             return await JobMessageRepository._get_usage_dictionary_list_with_connection_async(connection, run_id)
         async with self.postgresql_pool_manager.get_pool().acquire() as acquired_connection:
             return await JobMessageRepository._get_usage_dictionary_list_with_connection_async(acquired_connection, run_id)
+
+    async def get_thread_root_message_list_async(self, thread_id : uuid.UUID) -> List[Dict[str, Any]]:
+        # 대화 이력 복원용 : 스레드 전체의 루트 에이전트 메시지를 시간 오름차순으로 조회한다
+        async with self.postgresql_pool_manager.get_pool().acquire() as connection:
+            record_list = await connection.fetch("SELECT * FROM llm_job_message WHERE thread_id = $1 AND is_root_message = TRUE ORDER BY created_at ASC, seq_first ASC", thread_id)
+            return [JobMessageRepository._convert_record_to_dictionary(record) for record in record_list]
 
     async def get_last_root_ai_message_async(self, run_id : uuid.UUID) -> Optional[Dict[str, Any]]:
         async with self.postgresql_pool_manager.get_pool().acquire() as connection:

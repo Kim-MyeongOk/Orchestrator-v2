@@ -107,6 +107,77 @@ VALUES
                 await connection.execute(query_text, run_id, thread_id, user_id, job_type, status, output_format, request_payload_dictionary, int(turn_number), idempotency_key, user_id, user_id, current_time, current_time)
                 return int(turn_number)
 
+    @staticmethod
+    async def _insert_completed_job_with_connection_async(connection : asyncpg.Connection, run_id : uuid.UUID, thread_id : uuid.UUID, user_id : uuid.UUID, job_type : str, output_format : str, request_payload_dictionary : Dict[str, Any], final_output_dictionary : Optional[Dict[str, Any]], aggregated_event_dictionary : Optional[Dict[str, Any]], message_count : int, event_count : int, chunk_count : int, last_sequence_number : int, started_at : Optional[datetime]) -> int:
+        # 오케스트레이터처럼 실행이 끝난 뒤 한 번에 저장하는 파이프라인용.
+        # 종료 상태(completed)로 직접 INSERT 하므로 활성 job 부분 유니크 인덱스와 충돌하지 않으며,
+        # advisory lock / 소유권 검사 / turn_number 채번은 insert_job_async 와 동일한 규칙을 따른다.
+        query_text = """
+INSERT INTO llm_job
+(
+    run_id,
+    thread_id,
+    user_id,
+    job_type,
+    status,
+    output_format,
+    request_payload,
+    message_count,
+    event_count,
+    last_sequence_number,
+    chunk_count,
+    turn_number,
+    has_complete_chunk_history,
+    final_output,
+    aggregated_event,
+    created_user_id,
+    updated_user_id,
+    created_at,
+    started_at,
+    completed_at,
+    updated_at
+)
+VALUES
+(
+    $1,
+    $2,
+    $3,
+    $4,
+    'completed',
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    $10,
+    $11,
+    TRUE,
+    $12,
+    $13,
+    $14,
+    $14,
+    $15,
+    $16,
+    $17,
+    $17
+)
+"""
+        current_time = datetime.now(timezone.utc)
+        await connection.fetchval("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", str(thread_id))
+        owner_user_id = await connection.fetchval("SELECT user_id FROM llm_job WHERE thread_id = $1 ORDER BY created_at ASC, run_id ASC LIMIT 1", thread_id)
+        if owner_user_id is not None and owner_user_id != user_id:
+            raise ValueError(f"THREAD USER MISMATCH : {thread_id}")
+        turn_number = await connection.fetchval("SELECT COALESCE(MAX(turn_number), 0) + 1 FROM llm_job WHERE thread_id = $1", thread_id)
+        await connection.execute(query_text, run_id, thread_id, user_id, job_type, output_format, request_payload_dictionary, message_count, event_count, last_sequence_number, chunk_count, int(turn_number), final_output_dictionary, aggregated_event_dictionary, user_id, started_at or current_time, started_at, current_time)
+        return int(turn_number)
+
+    async def insert_completed_job_async(self, run_id : uuid.UUID, thread_id : uuid.UUID, user_id : uuid.UUID, job_type : str, output_format : str, request_payload_dictionary : Dict[str, Any], final_output_dictionary : Optional[Dict[str, Any]], aggregated_event_dictionary : Optional[Dict[str, Any]], message_count : int, event_count : int, chunk_count : int, last_sequence_number : int, started_at : Optional[datetime], connection : Optional[asyncpg.Connection] = None) -> int:
+        if connection is not None:
+            return await JobRepository._insert_completed_job_with_connection_async(connection, run_id, thread_id, user_id, job_type, output_format, request_payload_dictionary, final_output_dictionary, aggregated_event_dictionary, message_count, event_count, chunk_count, last_sequence_number, started_at)
+        async with self.postgresql_pool_manager.get_pool().acquire() as acquired_connection:
+            async with acquired_connection.transaction():
+                return await JobRepository._insert_completed_job_with_connection_async(acquired_connection, run_id, thread_id, user_id, job_type, output_format, request_payload_dictionary, final_output_dictionary, aggregated_event_dictionary, message_count, event_count, chunk_count, last_sequence_number, started_at)
+
     async def update_job_status_async(self, run_id : uuid.UUID, status : str, error_message : Optional[str] = None) -> bool:
         if status != "running" and status not in JobRepository.TERMINAL_STATUS_SET:
             raise ValueError(f"INVALID JOB STATUS TRANSITION TARGET : {status}")

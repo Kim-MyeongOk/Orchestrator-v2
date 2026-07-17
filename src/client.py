@@ -78,7 +78,7 @@ class LLMServiceClient:
     @staticmethod
     def create_argument_parser() -> argparse.ArgumentParser:
         argument_parser = argparse.ArgumentParser(description = "LLM JOB SERVICE CLIENT")
-        argument_parser.add_argument("--base-url", default = "http://127.0.0.1:8000")
+        argument_parser.add_argument("--base-url", default = "http://localhost:8000") # http://127.0.0.1:8000
         argument_parser.add_argument("--user-id", required = True)
         subparser   = argument_parser.add_subparsers(dest = "command", required = True)
         chat_parser = subparser.add_parser("chat")
