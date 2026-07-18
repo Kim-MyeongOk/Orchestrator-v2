@@ -35,10 +35,11 @@ from typing             import AsyncIterator
 from typing             import Dict
 from typing             import List
 from typing             import Optional
-from fastapi            import FastAPI
-from fastapi            import HTTPException
-from fastapi.responses  import StreamingResponse
-from pydantic           import BaseModel
+from fastapi                 import FastAPI
+from fastapi                 import HTTPException
+from fastapi.responses       import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic                import BaseModel
 
 from langchain_core.messages           import BaseMessage
 from langchain_core.messages           import HumanMessage
@@ -139,6 +140,8 @@ class MonitorApplication:
         self.compiled_graph            = None
         self.checkpoint_connection_pool = None
         self.application               = FastAPI(title = "Think Bottleneck Monitor", lifespan = self._lifespan_async)
+        # 로컬 진단 대시보드(frontend/index.html 을 file:// 로 직접 오픈)에서의 fetch 를 허용한다
+        self.application.add_middleware(CORSMiddleware, allow_origins = ["*"], allow_methods = ["*"], allow_headers = ["*"])
         self.application.add_api_route("/diagnose", self.diagnose_thread_async, methods = ["GET"])
         self.application.add_api_route("/stream",   self.stream_async,          methods = ["POST"])
 
