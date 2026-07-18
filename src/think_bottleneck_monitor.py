@@ -40,13 +40,12 @@ from fastapi            import HTTPException
 from fastapi.responses  import StreamingResponse
 from pydantic           import BaseModel
 
-from langchain_core.messages import BaseMessage
-from langchain_core.messages import HumanMessage
-from langchain_ollama        import ChatOllama
-from langgraph.graph         import StateGraph
-from langgraph.graph         import MessagesState
-from langgraph.graph         import START
-from langgraph.graph         import END
+from langchain_core.messages           import BaseMessage
+from langchain_core.messages           import HumanMessage
+from langchain.agents.middleware.types import AgentMiddleware
+
+from app.llm.agent.model_configuration import ModelConfiguration
+from app.llm.agent.deep_agent_factory  import DeepAgentFactory
 
 load_dotenv()
 
@@ -72,28 +71,16 @@ def _extract_think_byte_count(message : BaseMessage) -> int:
 
 
 ##################################################
-# [병목 해결 가이드] 생각 토큰 트리밍 + 윈도잉
+# [병목 해결 가이드] 생각 토큰 트리밍 + 윈도잉 미들웨어
 #
 # 원칙 : 체크포인트(원본 상태)는 건드리지 않고, "모델에게 보내는 프롬프트"만
-# 슬림하게 만든다. 상태를 직접 수정(after_model 류)하면 이력이 소실되므로
-# 프롬프트 직전 일시 변환(transient)이 안전하다.
-#
-# deepagents / langchain 1.x 프로덕션 그래프에 붙일 때는 아래 미들웨어 형태를 사용한다
-# (before_model 훅은 반환값이 체크포인트에 다시 기록되므로 쓰지 말 것 —
-#  awrap_model_call 은 모델 요청만 override 하고 상태는 그대로 둔다) :
-#
-#   from langchain.agents.middleware.types import AgentMiddleware
-#
-#   class ThinkTrimmingMiddleware(AgentMiddleware):
-#       async def awrap_model_call(self, request, handler):
-#           slim_message_list = prepare_model_input(request.messages)
-#           return await handler(request.override(messages = slim_message_list))
-#
-#   compiled_graph = create_deep_agent(model = ..., middleware = [ThinkTrimmingMiddleware()], ...)
+# 슬림하게 만든다. before_model 훅은 반환값이 체크포인트에 다시 기록되므로 쓰지 않는다 —
+# awrap_model_call 은 모델 요청(ModelRequest)만 override 하고 State 는 그대로 둔다.
+# 프로덕션(server.py 의 DeepAgentFactory.create)에도 middleware_list 로 그대로 주입 가능하다.
 ##################################################
 
 def prepare_model_input(message_list : List[BaseMessage], window_message_count : int = 20) -> List[BaseMessage]:
-    # ① 트리밍 : 과거 AI 메시지의 <think> 인라인 태그와 reasoning_content 를 제거한다
+    # ① 트리밍 : 과거 메시지의 <think> 인라인 태그와 reasoning_content 를 제거한다
     # ② 윈도잉 : 최근 N개 메시지만 유지해 프리필 상한을 고정한다 (오래된 대화는 프롬프트에서 제외)
     slim_message_list = []
     for message in message_list[-window_message_count:]:
@@ -106,32 +93,36 @@ def prepare_model_input(message_list : List[BaseMessage], window_message_count :
     return slim_message_list
 
 
+class ThinkTrimmingMiddleware(AgentMiddleware):
+    # 모델 호출 직전에만 트리밍+윈도잉을 적용한다 (체크포인트 원본 보존)
+    def __init__(self, window_message_count : int = 20) -> None:
+        super().__init__()
+        self.window_message_count = window_message_count
+
+    async def awrap_model_call(self, request, handler):
+        slim_message_list = prepare_model_input(request.messages, self.window_message_count)
+        return await handler(request.override(messages = slim_message_list))
+
+
 ##################################################
-# LangGraph 그래프 (진단 재현용 최소 구성 : 단일 model 노드)
+# LangGraph 그래프
+# 운영과 동일한 deepagents 그래프를 사용한다 — 같은 체크포인트를 같은 방식으로 읽어야
+# 진단(aget_state)이 운영 복원 경로를 정확히 재현한다. (단순 MessagesState 그래프는
+# deepagents 체크포인트의 pending writes 를 적용하지 못해 messages 가 0 으로 보인다)
 ##################################################
 
-def _create_chat_model() -> ChatOllama:
-    # reasoning=False : think 파라미터를 지원하는 모델에서는 생각 토큰 생성을 원천 차단한다
-    # (주의 : qwen3-vl:4b 등 thinking 전용 변형은 이 파라미터를 무시한다 → instruct 변형 사용 권장)
-    return ChatOllama(
-        model     = os.getenv("MODEL_NAME", "qwen3-vl:4b"),
-        base_url  = os.getenv("MODEL_BASE_URL", "http://localhost:11434"),
-        reasoning = False
+def _create_compiled_graph(checkpoint_saver):
+    model_configuration = ModelConfiguration(
+        provider          = os.getenv("MODEL_PROVIDER", "ollama"),
+        model_name        = os.getenv("MODEL_NAME", "qwen3-vl:4b"),
+        base_url          = os.getenv("MODEL_BASE_URL", "http://localhost:11434"),
+        reasoning_enabled = False   # think 파라미터 지원 모델에서는 생각 토큰 생성을 원천 차단 (thinking 전용 변형은 무시함)
     )
-
-
-def _create_graph_builder(chat_model : ChatOllama) -> StateGraph:
-    async def call_model_async(state : MessagesState) -> Dict[str, Any]:
-        # [병목 해결 적용 지점] 상태 원본이 아닌 트리밍+윈도잉된 프롬프트로 모델을 호출한다
-        slim_message_list = prepare_model_input(state["messages"])
-        response_message  = await chat_model.ainvoke(slim_message_list)
-        return {"messages" : [response_message]}
-
-    graph_builder = StateGraph(MessagesState)
-    graph_builder.add_node("model", call_model_async)
-    graph_builder.add_edge(START, "model")
-    graph_builder.add_edge("model", END)
-    return graph_builder
+    return DeepAgentFactory.create(
+        model_configuration,
+        checkpointer    = checkpoint_saver,
+        middleware_list = [ThinkTrimmingMiddleware()]   # [병목 해결 가이드] 실제 적용 상태
+    )
 
 
 ##################################################
@@ -173,7 +164,7 @@ class MonitorApplication:
         checkpoint_saver = AsyncPostgresSaver(self.checkpoint_connection_pool)
         await checkpoint_saver.setup()
 
-        self.compiled_graph = _create_graph_builder(_create_chat_model()).compile(checkpointer = checkpoint_saver)
+        self.compiled_graph = _create_compiled_graph(checkpoint_saver)
         try:
             yield
         finally:
