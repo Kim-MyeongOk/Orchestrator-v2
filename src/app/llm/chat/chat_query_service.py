@@ -55,7 +55,7 @@ class ChatQueryService:
             "task_list"             : task_dictionary_list,
             "chunk_list"            : chunk_dictionary_list,
             "unassigned_chunk_list" : ChatQueryService._get_unassigned_chunk_list(chunk_dictionary_list),
-            "through_seq"           : through_sequence_number,
+            "through_sequence"      : through_sequence_number,
             "is_terminal"           : str(job_dictionary.get("status")) in ChatQueryService.TERMINAL_STATUS_SET,
-            "next_after_seq"        : through_sequence_number
+            "next_after_sequence"   : through_sequence_number
         }
