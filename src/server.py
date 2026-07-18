@@ -41,6 +41,8 @@ from common.database.postgresql.postgresql_configuration import PostgresqlConfig
 from common.cache.redis_stream.redis_configuration       import RedisConfiguration
 from app.llm.agent.model_configuration                   import ModelConfiguration
 from app.llm.agent.deep_agent_factory                    import DeepAgentFactory
+from app.llm.agent.tavily_search_tool_factory            import TavilySearchToolFactory
+from app.llm.agent.research_subagent_factory             import ResearchSubAgentFactory
 from app.orchestrator.api.orchestrator_api_router        import OrchestratorAPIRouter
 from app.orchestrator.repository.checkpoint_schema_initializer import CheckpointSchemaInitializer
 from app.orchestrator.service.chat_history_service       import ChatHistoryService
@@ -136,7 +138,7 @@ class ServerApplication:
         self.checkpoint_schema_initializer = CheckpointSchemaInitializer(self.postgresql_pool_manager, self.checkpoint_partition_count)
         self.checkpoint_connection_pool   = None  # psycopg AsyncConnectionPool (lifespan 에서 생성/종료)
 
-        self.orchestrator_compiled_graph  = DeepAgentFactory.create(ServerApplication._get_model_configuration())
+        self.orchestrator_compiled_graph  = self._create_orchestrator_compiled_graph()
         self.orchestrator_api_router      = OrchestratorAPIRouter(self.orchestrator_compiled_graph, self.uuid_v7_generator, self.chat_history_service, self.chunk_flush_service, self.graph_stream_executor, self.redis_chunk_buffer, self.is_checkpoint_enabled)
 
         self.application = FastAPI(title = "LLM Job Service", lifespan = self.lifespan_async)
@@ -210,6 +212,19 @@ class ServerApplication:
             extra_body_dictionary     = ServerApplication._get_optional_dictionary("MODEL_EXTRA_BODY")
         )
 
+    def _create_orchestrator_compiled_graph(self, checkpointer = None):
+        # 오케스트레이터 그래프 조립 : Tavily 검색 도구가 있으면 웹 리서치 서브에이전트를 붙여
+        # 메인 → task() → 서브에이전트 트리 구조로 컴파일된다 (TAVILY_API_KEY 미설정 시 단일 노드)
+        search_tool   = TavilySearchToolFactory.create()
+        subagent_list = ResearchSubAgentFactory.create_subagent_list(search_tool)
+        tool_list     = [search_tool] if search_tool is not None else None
+        return DeepAgentFactory.create(
+            ServerApplication._get_model_configuration(),
+            tool_list     = tool_list,
+            checkpointer  = checkpointer,
+            subagent_list = subagent_list
+        )
+
     async def _initialize_checkpointer_async(self) -> None:
         # PostgreSQL 체크포인터 초기화 : 파티션 스키마 선생성 → psycopg 풀 → setup() → 그래프 재조립·교체
         # (선주입된 마이그레이션 버전 덕분에 setup() 은 신규 마이그레이션이 없는 한 no-op 이다)
@@ -227,7 +242,7 @@ class ServerApplication:
         await checkpoint_saver.setup()
 
         # 체크포인터가 주입된 그래프로 교체 : 이후 요청부터 thread_id 기반 상태 영속화가 동작한다
-        self.orchestrator_compiled_graph            = DeepAgentFactory.create(ServerApplication._get_model_configuration(), checkpointer = checkpoint_saver)
+        self.orchestrator_compiled_graph            = self._create_orchestrator_compiled_graph(checkpointer = checkpoint_saver)
         self.orchestrator_api_router.compiled_graph = self.orchestrator_compiled_graph
 
     @staticmethod
