@@ -34,14 +34,16 @@ from app.orchestrator.service.redis_chunk_buffer      import RedisChunkBuffer
 
 
 class OrchestratorAPIRouter:
-    def __init__(self, compiled_graph : Any, uuid_v7_generator : UUIDV7Generator, chat_history_service : ChatHistoryService, chunk_flush_service : ChunkFlushService, graph_stream_executor : GraphStreamExecutor, redis_chunk_buffer : RedisChunkBuffer):
-        # compiled_graph : 실제 서비스에서는 workflow.compile() 결과(CompiledStateGraph)로 교체
+    def __init__(self, compiled_graph : Any, uuid_v7_generator : UUIDV7Generator, chat_history_service : ChatHistoryService, chunk_flush_service : ChunkFlushService, graph_stream_executor : GraphStreamExecutor, redis_chunk_buffer : RedisChunkBuffer, is_checkpoint_enabled : bool = False):
+        # compiled_graph        : workflow.compile() 결과(CompiledStateGraph). 체크포인트 활성 시 lifespan 에서 체크포인터 주입본으로 교체된다
+        # is_checkpoint_enabled : True 면 LangGraph 체크포인터가 thread_id 로 상태를 복원하므로 수동 이력 복원을 건너뛴다 (이중 주입 방지)
         self.compiled_graph        = compiled_graph
         self.uuid_v7_generator     = uuid_v7_generator
         self.chat_history_service  = chat_history_service
         self.chunk_flush_service   = chunk_flush_service
         self.graph_stream_executor = graph_stream_executor
         self.redis_chunk_buffer    = redis_chunk_buffer
+        self.is_checkpoint_enabled = is_checkpoint_enabled
         self.api_router            = APIRouter(prefix = "/api/v1/orchestrator", tags = ["orchestrator"])
         self.api_router.add_api_route("/stream", self.stream_orchestrator_async, methods = ["POST"])
 
@@ -76,10 +78,14 @@ class OrchestratorAPIRouter:
         started_at = datetime.now(timezone.utc)
 
         try:
-            # ① thread_id 로 이전 대화 이력을 복원한다 (대화 재개, 소유권은 스레드 최초 job 의 user_id 로 강제)
-            history_message_list = await self.chat_history_service.get_chat_history_async(thread_id, x_user_id)
+            # ① 이전 대화 이력 복원 (대화 재개, 소유권은 스레드 최초 job 의 user_id 로 강제)
+            #    체크포인트 활성 시 : LangGraph 체크포인터가 configurable.thread_id 로 상태를 자동 복원하므로
+            #    수동 복원을 건너뛴다 (같은 이력이 두 번 주입되는 이중 저장 문제 방지).
+            #    소유권 검사는 아래 store_user_message_async 내부에서 계속 수행된다.
+            history_message_list = [] if self.is_checkpoint_enabled else await self.chat_history_service.get_chat_history_async(thread_id, x_user_id)
 
             # ② 사용자 질문을 llm_job_message 에 선행 적재한다 (thread upsert 포함 — 스트리밍 실패와 무관하게 질문은 이력에 남는다)
+            #    체크포인트 활성 시에도 유지 : checkpoint_* 는 실행 상태 원본, llm_job_message 는 조회/표시용 프로젝션으로 역할이 분리된다
             await self.chunk_flush_service.store_user_message_async(thread_id, run_id, x_user_id, stream_request.user_message, stream_request.files_metadata)
         except JobOwnershipError as job_ownership_error:
             raise HTTPException(status_code = 403, detail = str(job_ownership_error))

@@ -1,6 +1,12 @@
 import os
+import sys
 import json
+import asyncio
 import uvicorn
+
+# Windows : psycopg 비동기(체크포인터)는 ProactorEventLoop 를 지원하지 않으므로 Selector 정책으로 전환한다
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from dotenv        import load_dotenv
 from fastapi       import FastAPI
@@ -35,7 +41,10 @@ from common.database.postgresql.postgresql_configuration import PostgresqlConfig
 from common.cache.redis_stream.redis_configuration       import RedisConfiguration
 from app.llm.agent.model_configuration                   import ModelConfiguration
 from app.llm.agent.deep_agent_factory                    import DeepAgentFactory
+from app.llm.agent.tavily_search_tool_factory            import TavilySearchToolFactory
+from app.llm.agent.research_subagent_factory             import ResearchSubAgentFactory
 from app.orchestrator.api.orchestrator_api_router        import OrchestratorAPIRouter
+from app.orchestrator.repository.checkpoint_schema_initializer import CheckpointSchemaInitializer
 from app.orchestrator.service.chat_history_service       import ChatHistoryService
 from app.orchestrator.service.chunk_flush_service        import ChunkFlushService
 from app.orchestrator.service.graph_stream_executor      import GraphStreamExecutor
@@ -121,8 +130,16 @@ class ServerApplication:
         self.chat_history_service         = ChatHistoryService(self.job_repository, self.job_message_repository)
         self.chunk_flush_service          = ChunkFlushService(self.postgresql_pool_manager, self.redis_chunk_buffer, self.job_repository, self.job_message_repository, self.chat_thread_repository)
         self.graph_stream_executor        = GraphStreamExecutor(self.redis_chunk_buffer)
-        self.orchestrator_compiled_graph  = DeepAgentFactory.create(ServerApplication._get_model_configuration())
-        self.orchestrator_api_router      = OrchestratorAPIRouter(self.orchestrator_compiled_graph, self.uuid_v7_generator, self.chat_history_service, self.chunk_flush_service, self.graph_stream_executor, self.redis_chunk_buffer)
+
+        # 체크포인트 설정 : 활성 시 lifespan 에서 PostgresSaver 를 만들어 그래프를 재조립·교체한다
+        # (AsyncPostgresSaver 는 async 컨텍스트가 필요하므로 생성자에서는 비체크포인트 그래프로 시작)
+        self.is_checkpoint_enabled        = ServerApplication._get_boolean("CHECKPOINT_ENABLED", False)
+        self.checkpoint_partition_count   = int(os.getenv("CHECKPOINT_PARTITION_COUNT", "8"))
+        self.checkpoint_schema_initializer = CheckpointSchemaInitializer(self.postgresql_pool_manager, self.checkpoint_partition_count)
+        self.checkpoint_connection_pool   = None  # psycopg AsyncConnectionPool (lifespan 에서 생성/종료)
+
+        self.orchestrator_compiled_graph  = self._create_orchestrator_compiled_graph()
+        self.orchestrator_api_router      = OrchestratorAPIRouter(self.orchestrator_compiled_graph, self.uuid_v7_generator, self.chat_history_service, self.chunk_flush_service, self.graph_stream_executor, self.redis_chunk_buffer, self.is_checkpoint_enabled)
 
         self.application = FastAPI(title = "LLM Job Service", lifespan = self.lifespan_async)
         self.application.include_router(self.llm_api_router.get_router())
@@ -195,6 +212,39 @@ class ServerApplication:
             extra_body_dictionary     = ServerApplication._get_optional_dictionary("MODEL_EXTRA_BODY")
         )
 
+    def _create_orchestrator_compiled_graph(self, checkpointer = None):
+        # 오케스트레이터 그래프 조립 : Tavily 검색 도구가 있으면 웹 리서치 서브에이전트를 붙여
+        # 메인 → task() → 서브에이전트 트리 구조로 컴파일된다 (TAVILY_API_KEY 미설정 시 단일 노드)
+        search_tool   = TavilySearchToolFactory.create()
+        subagent_list = ResearchSubAgentFactory.create_subagent_list(search_tool)
+        tool_list     = [search_tool] if search_tool is not None else None
+        return DeepAgentFactory.create(
+            ServerApplication._get_model_configuration(),
+            tool_list     = tool_list,
+            checkpointer  = checkpointer,
+            subagent_list = subagent_list
+        )
+
+    async def _initialize_checkpointer_async(self) -> None:
+        # PostgreSQL 체크포인터 초기화 : 파티션 스키마 선생성 → psycopg 풀 → setup() → 그래프 재조립·교체
+        # (선주입된 마이그레이션 버전 덕분에 setup() 은 신규 마이그레이션이 없는 한 no-op 이다)
+        from psycopg.rows                       import dict_row
+        from psycopg_pool                       import AsyncConnectionPool
+        from langgraph.checkpoint.postgres.aio  import AsyncPostgresSaver
+
+        postgresql_configuration = ServerApplication._get_postgresql_configuration()
+        connection_info_text     = f"host={postgresql_configuration.host} port={postgresql_configuration.port} dbname={postgresql_configuration.database_name} user={postgresql_configuration.user_name} password={postgresql_configuration.password}"
+
+        await self.checkpoint_schema_initializer.initialize_schema_async()
+        self.checkpoint_connection_pool = AsyncConnectionPool(connection_info_text, min_size = 1, max_size = 5, open = False, kwargs = {"autocommit" : True, "row_factory" : dict_row})
+        await self.checkpoint_connection_pool.open()
+        checkpoint_saver = AsyncPostgresSaver(self.checkpoint_connection_pool)
+        await checkpoint_saver.setup()
+
+        # 체크포인터가 주입된 그래프로 교체 : 이후 요청부터 thread_id 기반 상태 영속화가 동작한다
+        self.orchestrator_compiled_graph            = self._create_orchestrator_compiled_graph(checkpointer = checkpoint_saver)
+        self.orchestrator_api_router.compiled_graph = self.orchestrator_compiled_graph
+
     @staticmethod
     def _create_orchestrator_redis_client() -> Redis:
         # 오케스트레이터 청크 버퍼용 redis.asyncio 클라이언트 (기존 REDIS_* 환경변수 재사용)
@@ -214,6 +264,8 @@ class ServerApplication:
         await self.postgresql_pool_manager.open_async()
         try:
             await self.job_schema_initializer.initialize_schema_async()
+            if self.is_checkpoint_enabled:
+                await self._initialize_checkpointer_async()
             await self.redis_stream_client.open_async()
             await self.redis_stream_client.ping_async()
             await self.job_reaper.start_async()
@@ -224,6 +276,8 @@ class ServerApplication:
             await self.job_reaper.stop_async()
             await self.job_manager.shutdown_async()
             await self.redis_stream_client.close_async()
+            if self.checkpoint_connection_pool is not None:
+                await self.checkpoint_connection_pool.close()
             await self.postgresql_pool_manager.close_async()
 
     def get_application(self) -> FastAPI:
@@ -231,4 +285,11 @@ class ServerApplication:
 
 if __name__ == "__main__":
     server_application = ServerApplication()
-    uvicorn.run(server_application.get_application(), host = os.getenv("SERVER_HOST", "localhost"), port = int(os.getenv("SERVER_PORT", "8000")))
+    uvicorn_config     = uvicorn.Config(server_application.get_application(), host = os.getenv("SERVER_HOST", "localhost"), port = int(os.getenv("SERVER_PORT", "8000")))
+    uvicorn_server     = uvicorn.Server(uvicorn_config)
+    if sys.platform == "win32":
+        # uvicorn 은 Windows 에서 ProactorEventLoop 를 강제하지만 psycopg 비동기(체크포인터)가
+        # 이를 지원하지 않으므로 SelectorEventLoop 팩토리로 직접 구동한다
+        asyncio.run(uvicorn_server.serve(), loop_factory = asyncio.SelectorEventLoop)
+    else:
+        uvicorn_server.run()
