@@ -118,7 +118,8 @@ def _create_compiled_graph(checkpoint_saver, model_name : Optional[str] = None):
         provider            = os.getenv("MODEL_PROVIDER", "ollama"),
         model_name          = model_name or os.getenv("MODEL_NAME", "qwen3-vl:4b"),
         base_url            = os.getenv("MODEL_BASE_URL", "http://localhost:11434"),
-        reasoning_enabled   = False,  # think 파라미터 지원 모델에서는 생각 토큰 생성을 원천 차단 (thinking 전용 변형은 무시함)
+        reasoning_enabled   = True,   # True : thinking 을 additional_kwargs.reasoning_content 로 분리 수신 → 실시간 UI 표시 가능
+                                      # (다음 턴 프롬프트에서는 ThinkTrimmingMiddleware 가 제거하므로 컨텍스트를 오염시키지 않는다)
         context_token_count = int(os.getenv("MODEL_CONTEXT_TOKEN_COUNT", "8192")),   # Ollama 기본 4096 은 deepagents 프롬프트+히스토리에 부족 → 절단 → thinking 폭주
         maximum_token_count = int(os.getenv("MODEL_MAXIMUM_TOKEN_COUNT", "4096") or "4096")   # 폭주 시 생성 상한 (thinking 포함)
     )
@@ -134,9 +135,11 @@ def _create_compiled_graph(checkpoint_saver, model_name : Optional[str] = None):
 ##################################################
 
 class StreamRequest(BaseModel):
-    thread_id : str
-    message   : str
-    model     : Optional[str] = None   # 요청별 모델 선택 (미지정 시 .env 기본 모델)
+    thread_id         : str
+    message           : str
+    model             : Optional[str] = None    # 요청별 모델 선택 (미지정 시 .env 기본 모델)
+    include_reasoning : bool          = False   # True : NDJSON 이벤트 스트림({"type":"reasoning"|"token","text":...}) 으로 생각 과정을 함께 전송
+                                                # False : 답변 토큰만 평문 스트림 (기존 클라이언트 하위호환)
 
 
 class MonitorApplication:
@@ -229,17 +232,22 @@ class MonitorApplication:
             is_first_token_seen  = False
             print(f"STREAM START : THREAD {stream_request.thread_id} - MODEL {stream_request.model or os.getenv('MODEL_NAME', 'qwen3-vl:4b')}", flush = True)
             async for message_chunk, _metadata in compiled_graph.astream(input_dictionary, runnable_configuration, stream_mode = "messages"):
+                # 생각 과정(reasoning) : 사용자가 대기 시간 동안 진행 상황을 볼 수 있게 실시간 전송한다 (NDJSON 모드 한정)
+                reasoning_text = (message_chunk.additional_kwargs or {}).get("reasoning_content", "")
+                if reasoning_text and stream_request.include_reasoning:
+                    yield json.dumps({"type" : "reasoning", "text" : reasoning_text}, ensure_ascii = False) + "\n"
                 token_text = message_chunk.content if isinstance(message_chunk.content, str) else ""
                 if not token_text:
                     continue
                 if not is_first_token_seen:
                     is_first_token_seen = True
-                    # TTFT(Time To First Token) : 프리필 병목이 여기 숫자로 그대로 드러난다
+                    # TTFT(Time To First Token) : 첫 "답변" 토큰 기준 (생각 토큰 제외) — 프리필+생각 병목이 여기 숫자로 드러난다
                     print(f"TTFT : THREAD {stream_request.thread_id} - {(time.perf_counter() - request_started_at) * 1000:.0f}ms", flush = True)
-                yield token_text
+                yield json.dumps({"type" : "token", "text" : token_text}, ensure_ascii = False) + "\n" if stream_request.include_reasoning else token_text
             print(f"TURN COMPLETED : THREAD {stream_request.thread_id} - TOTAL {(time.perf_counter() - request_started_at) * 1000:.0f}ms", flush = True)
 
-        return StreamingResponse(generate_token_stream_async(), media_type = "text/plain; charset=utf-8", headers = {"Cache-Control" : "no-cache", "X-Accel-Buffering" : "no"})
+        response_media_type = "application/x-ndjson" if stream_request.include_reasoning else "text/plain; charset=utf-8"
+        return StreamingResponse(generate_token_stream_async(), media_type = response_media_type, headers = {"Cache-Control" : "no-cache", "X-Accel-Buffering" : "no"})
 
     def get_application(self) -> FastAPI:
         return self.application

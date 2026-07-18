@@ -226,7 +226,7 @@ function renderActiveRoom() {
     for (const storedMessage of room.messages) {
         if (storedMessage.role === "user")       appendUserBubble(storedMessage.text, false);
         else if (storedMessage.role === "error") appendAgentBubble().markError(storedMessage.text);
-        else                                     { const bubble = appendAgentBubble(); bubble.appendText(storedMessage.text); bubble.finalize(); }
+        else                                     { const bubble = appendAgentBubble(); bubble.setStoredReasoning(storedMessage.reasoning); bubble.appendText(storedMessage.text); bubble.finalize(); }
     }
     scrollFeedToBottom();
 }
@@ -289,17 +289,76 @@ function appendUserBubble(text, animate = true) {
 }
 
 function appendAgentBubble() {
-    // 스트리밍 누적용 말풍선 : 첫 토큰 전에는 타이핑 인디케이터를 보여준다
+    // 스트리밍 누적용 말풍선 : 첫 토큰 전에는 타이핑 인디케이터, 생각 과정은 접이식 섹션에 실시간 표시.
+    // 말풍선 아래 메타라인에 경과 시간·토큰 수를 라이브로 갱신한다 (Ollama 는 청크당 1토큰 스트리밍 → 이벤트 수 = 토큰 수)
     const row = document.createElement("div");
     row.className = "flex justify-start bubble-enter";
-    // 주의 : 말풍선은 whitespace-pre-wrap 이므로 태그 사이에 개행/들여쓰기를 넣으면 여백으로 렌더링된다
-    row.innerHTML = `<div class="max-w-[78%] md:max-w-[65%] bg-slate-800 border border-slate-700/60 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow"><span class="typing-indicator inline-flex gap-1 items-center py-1"><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span></span><span class="agent-text"></span></div>`;
+    // 주의 : 답변 영역은 whitespace-pre-wrap 이므로 태그 사이에 개행/들여쓰기를 넣으면 여백으로 렌더링된다
+    row.innerHTML = `<div class="flex flex-col items-start max-w-[78%] md:max-w-[65%]"><div class="bg-slate-800 border border-slate-700/60 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed shadow w-fit min-w-0"><details class="reasoning-details hidden mb-1.5 -mx-1"><summary class="cursor-pointer select-none text-[11px] text-slate-500 hover:text-slate-300 transition px-1"> reasoning-status <span class="reasoning-status text-slate-600"></span></summary><div class="reasoning-text chat-scroll whitespace-pre-wrap text-[11px] leading-relaxed text-slate-500 bg-slate-950/50 border border-slate-800 rounded-lg px-2.5 py-2 mt-1 max-h-36 overflow-y-auto"></div></details><span class="typing-indicator inline-flex gap-1 items-center py-1"><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span></span><span class="agent-text whitespace-pre-wrap"></span></div><div class="meta-line hidden text-[10px] text-slate-600 mt-1 px-1 font-mono"></div></div>`;
     messageFeed.appendChild(row);
     scrollFeedToBottom();
+    const reasoningDetails = row.querySelector(".reasoning-details");
+    const reasoningText    = row.querySelector(".reasoning-text");
+    const metaLine         = row.querySelector(".meta-line");
+
+    // 라이브 메타 상태 (경과 시간 타이머 + 토큰 카운터)
+    let liveStartedAt        = null;
+    let liveTimerId          = null;
+    let reasoningTokenCount  = 0;
+    let answerTokenCount     = 0;
+
+    const formatElapsedSeconds = () => liveStartedAt === null ? "0.0" : ((performance.now() - liveStartedAt) / 1000).toFixed(1);
+    const renderMetaLine = () => {
+        metaLine.classList.remove("hidden");
+        metaLine.textContent = `⏱ ${formatElapsedSeconds()}s · 생각 ${reasoningTokenCount} 토큰 · 응답 ${answerTokenCount} 토큰`;
+        if (!reasoningDetails.classList.contains("hidden") && reasoningDetails.open) {
+            row.querySelector(".reasoning-status").textContent = `(생각 중… ${formatElapsedSeconds()}s · ${reasoningTokenCount} 토큰)`;
+        }
+    };
+
     return {
+        startLiveMeta : () => {
+            // 전송 직후 호출 : 0.1초 간격으로 경과 시간을 갱신한다 (클로드식 실시간 카운터)
+            liveStartedAt = performance.now();
+            liveTimerId   = setInterval(renderMetaLine, 100);
+            renderMetaLine();
+        },
+        getMeta : () => ({ elapsed_second_text : formatElapsedSeconds(), reasoning_token_count : reasoningTokenCount, answer_token_count : answerTokenCount }),
+        setStoredMeta : (storedMeta) => {
+            // 방 전환 복원용 : 고정 메타라인만 표시 (타이머 없음)
+            if (!storedMeta) return;
+            metaLine.classList.remove("hidden");
+            metaLine.textContent = `⏱ ${storedMeta.elapsed_second_text}s · 생각 ${storedMeta.reasoning_token_count} 토큰 · 응답 ${storedMeta.answer_token_count} 토큰`;
+        },
+        appendReasoning : (chunkText) => {
+            // 생각 과정 실시간 누적 : 첫 조각에서 섹션을 펼치고, 내부 스크롤을 따라간다 (대기 지루함 해소)
+            if (reasoningDetails.classList.contains("hidden")) {
+                reasoningDetails.classList.remove("hidden");
+                reasoningDetails.open = true;
+                row.querySelector(".reasoning-status").textContent = "(생각 중…)";
+            }
+            reasoningText.textContent += chunkText;
+            reasoningText.scrollTop = reasoningText.scrollHeight;
+            scrollFeedToBottom();
+        },
+        setStoredReasoning : (storedText) => {
+            // 방 전환 복원용 : 접힌 상태로 생각 과정을 채워 넣는다
+            if (!storedText) return;
+            reasoningDetails.classList.remove("hidden");
+            reasoningDetails.open = false;
+            reasoningText.textContent = storedText;
+        },
+        getReasoningText : () => reasoningText.textContent,
         appendText : (chunkText) => {
             const agentText = row.querySelector(".agent-text");
-            if (agentText.textContent === "") chunkText = chunkText.replace(/^\s+/, "");  // 선두 개행/공백 제거 (whitespace-pre-wrap 말풍선 부풀림 방지)
+            if (agentText.textContent === "") {
+                chunkText = chunkText.replace(/^\s+/, "");  // 선두 개행/공백 제거 (whitespace-pre-wrap 말풍선 부풀림 방지)
+                // 첫 답변 토큰 도착 : 생각 과정은 자동으로 접는다 (필요하면 다시 펼쳐볼 수 있다)
+                if (!reasoningDetails.classList.contains("hidden")) {
+                    reasoningDetails.open = false;
+                    row.querySelector(".reasoning-status").textContent = "";
+                }
+            }
             if (chunkText === "") return;
             const indicator = row.querySelector(".typing-indicator");
             if (indicator) indicator.remove();
@@ -310,6 +369,8 @@ function appendAgentBubble() {
             // 스트림 종료 시 : 후행 개행/공백 제거 + 빈 응답이면 인디케이터 대신 플레이스홀더 표시
             const indicator = row.querySelector(".typing-indicator");
             if (indicator) indicator.remove();
+            reasoningDetails.open = false;
+            row.querySelector(".reasoning-status").textContent = "";
             const agentText = row.querySelector(".agent-text");
             agentText.textContent = agentText.textContent.replace(/\s+$/, "");
             if (agentText.textContent === "") {
@@ -355,19 +416,35 @@ async function sendMessage() {
         const response = await fetch(`${apiUrl}/stream`, {
             method  : "POST",
             headers : { "Content-Type" : "application/json" },
-            body    : JSON.stringify({ thread_id : room.threadId, message : message, model : room.model || null })
+            body    : JSON.stringify({ thread_id : room.threadId, message : message, model : room.model || null, include_reasoning : true })
         });
         if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
 
+        // NDJSON 이벤트 스트림 파싱 : {"type":"reasoning","text":...} 는 생각 과정 섹션에,
+        // {"type":"token","text":...} 는 답변 본문에 실시간 누적한다
         const streamReader = response.body.getReader();
         const textDecoder  = new TextDecoder("utf-8");
+        let   lineBuffer   = "";
+        const dispatchEventLine = (eventLine) => {
+            if (!eventLine.trim()) return;
+            try {
+                const streamEvent = JSON.parse(eventLine);
+                if (streamEvent.type === "reasoning")  agentBubble.appendReasoning(streamEvent.text);
+                else if (streamEvent.type === "token") agentBubble.appendText(streamEvent.text);
+            } catch (_ignored) { agentBubble.appendText(eventLine); }   // NDJSON 이 아닌 서버(구버전) 폴백
+        };
         while (true) {
             const { done, value } = await streamReader.read();
             if (done) break;
-            agentBubble.appendText(textDecoder.decode(value, { stream : true }));
+            lineBuffer += textDecoder.decode(value, { stream : true });
+            const completeLines = lineBuffer.split("\n");
+            lineBuffer = completeLines.pop();   // 마지막 조각은 미완성 라인일 수 있으므로 버퍼에 남긴다
+            completeLines.forEach(dispatchEventLine);
         }
+        dispatchEventLine(lineBuffer);   // 종료 후 잔여 버퍼 처리
+
         const finalText = agentBubble.finalize();
-        room.messages.push({ role : "agent", text : finalText });
+        room.messages.push({ role : "agent", text : finalText, reasoning : agentBubble.getReasoningText() });
         saveRooms();
         setStatus("대기", "bg-slate-600");
     } catch (error) {
