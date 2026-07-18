@@ -218,7 +218,8 @@ class ServerApplication:
             maximum_retry_count       = int(os.getenv("MODEL_MAXIMUM_RETRY_COUNT", "2")),
             default_header_dictionary = default_header_dictionary,
             extra_body_dictionary     = ServerApplication._get_optional_dictionary("MODEL_EXTRA_BODY"),
-            reasoning_enabled         = ServerApplication._get_boolean("MODEL_REASONING_ENABLED", False)
+            reasoning_enabled         = ServerApplication._get_boolean("MODEL_REASONING_ENABLED", False),
+            context_token_count       = ServerApplication._get_optional_integer("MODEL_CONTEXT_TOKEN_COUNT")
         )
 
     def _create_orchestrator_compiled_graph(self, checkpointer = None):

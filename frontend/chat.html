@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orchestrator Chat</title>
+<!-- 빌드 도구 없이 즉시 동작 : Tailwind CDN -->
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+    .chat-scroll::-webkit-scrollbar       { width: 6px; }
+    .chat-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    .chat-scroll::-webkit-scrollbar-track { background: transparent; }
+
+    @keyframes typing-blink { 0%, 100% { opacity: 0.2; } 50% { opacity: 1; } }
+    .typing-dot        { animation: typing-blink 1.2s infinite; }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes bubble-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    .bubble-enter { animation: bubble-in 0.18s ease-out; }
+</style>
+</head>
+<body class="bg-slate-950 text-slate-100 h-screen overflow-hidden font-sans antialiased">
+
+<div class="h-full flex flex-col md:flex-row">
+
+    <!-- ══════════ 좌측 사이드바 : 세션 설정 ══════════ -->
+    <aside class="md:w-72 shrink-0 bg-slate-900/80 border-b md:border-b-0 md:border-r border-slate-800 p-4 md:p-5 space-y-4 md:space-y-5">
+        <div class="flex items-center gap-2.5">
+            <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-sm font-bold shadow-lg shadow-indigo-950">O</div>
+            <div>
+                <h1 class="text-sm font-semibold tracking-tight">Orchestrator Chat</h1>
+                <p class="text-[10px] text-slate-500">LangGraph 체크포인트 대화</p>
+            </div>
+        </div>
+
+        <div class="space-y-3.5">
+            <div>
+                <label class="block text-[11px] font-medium text-slate-400 mb-1.5">백엔드 API URL</label>
+                <input id="api-url" type="text" value="http://localhost:8002"
+                       class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+            </div>
+            <div>
+                <label class="block text-[11px] font-medium text-slate-400 mb-1.5">Thread ID</label>
+                <input id="thread-id" type="text"
+                       class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+                <p class="text-[10px] text-slate-600 mt-1.5 leading-relaxed">같은 Thread ID 로 보내면 체크포인트가 이전 대화를 복원합니다.</p>
+            </div>
+            <button onclick="resetSession()"
+                    class="w-full py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-medium text-slate-300 transition">
+                현재 세션 초기화
+            </button>
+        </div>
+    </aside>
+
+    <!-- ══════════ 우측 메인 : 채팅 영역 ══════════ -->
+    <main class="flex-1 flex flex-col min-h-0">
+
+        <!-- 상단 바 -->
+        <header class="shrink-0 h-14 px-4 md:px-6 bg-slate-900/60 border-b border-slate-800 flex items-center justify-between backdrop-blur">
+            <div class="flex items-center gap-2 min-w-0">
+                <span class="text-[11px] text-slate-500 shrink-0">Thread</span>
+                <code id="header-thread-id" class="text-[11px] text-slate-300 font-mono truncate">—</code>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+                <span id="status-dot" class="w-2 h-2 rounded-full bg-slate-600"></span>
+                <span id="status-text" class="text-[11px] text-slate-400">대기</span>
+            </div>
+        </header>
+
+        <!-- 중앙 대화창 -->
+        <div id="message-feed" class="chat-scroll flex-1 overflow-y-auto px-4 md:px-6 py-5 space-y-4">
+            <div class="text-center pt-10">
+                <p class="text-slate-600 text-sm">메시지를 보내 오케스트레이터와 대화를 시작하세요.</p>
+                <p class="text-slate-700 text-[11px] mt-1.5">백엔드 : <code class="font-mono">python src/think_bottleneck_monitor.py</code> (포트 8002)</p>
+            </div>
+        </div>
+
+        <!-- 하단 입력 바 -->
+        <footer class="shrink-0 border-t border-slate-800 bg-slate-900/60 backdrop-blur p-3 md:p-4">
+            <div class="max-w-3xl mx-auto flex items-end gap-2.5">
+                <textarea id="chat-input" rows="1" placeholder="메시지 입력…  (Enter 전송 · Shift+Enter 줄바꿈)"
+                          class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-sm resize-none max-h-40 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition placeholder:text-slate-600"></textarea>
+                <button id="send-button" onclick="sendMessage()"
+                        class="shrink-0 w-11 h-11 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition shadow-lg shadow-indigo-950/50">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5"><path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z"/></svg>
+                </button>
+            </div>
+        </footer>
+    </main>
+</div>
+
+<script>
+/* ══════════════════ 상태 ══════════════════ */
+
+let isStreaming = false;
+
+const messageFeed  = document.getElementById("message-feed");
+const chatInput    = document.getElementById("chat-input");
+const sendButton   = document.getElementById("send-button");
+
+/* ══════════════════ 세션 ══════════════════ */
+
+function setStatus(text, colorClass) {
+    document.getElementById("status-text").textContent = text;
+    document.getElementById("status-dot").className    = `w-2 h-2 rounded-full ${colorClass}`;
+}
+
+function syncHeaderThreadId() {
+    document.getElementById("header-thread-id").textContent = document.getElementById("thread-id").value || "—";
+}
+
+function resetSession() {
+    document.getElementById("thread-id").value = crypto.randomUUID();
+    syncHeaderThreadId();
+    messageFeed.innerHTML = "";
+    appendSystemNotice("새 세션이 시작되었습니다. 이전 체크포인트와 분리된 새 Thread 입니다.");
+    setStatus("대기", "bg-slate-600");
+}
+
+function appendSystemNotice(text) {
+    const notice = document.createElement("div");
+    notice.className   = "text-center text-[11px] text-slate-600 py-1";
+    notice.textContent = text;
+    messageFeed.appendChild(notice);
+    scrollFeedToBottom();
+}
+
+/* ══════════════════ 말풍선 렌더링 ══════════════════ */
+
+function scrollFeedToBottom() { messageFeed.scrollTop = messageFeed.scrollHeight; }
+
+function appendUserBubble(text) {
+    const row = document.createElement("div");
+    row.className = "flex justify-end bubble-enter";
+    row.innerHTML = `
+        <div class="max-w-[78%] md:max-w-[65%] bg-slate-700 rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow"></div>`;
+    row.firstElementChild.textContent = text;
+    messageFeed.appendChild(row);
+    scrollFeedToBottom();
+}
+
+function appendAgentBubble() {
+    // 스트리밍 누적용 말풍선 : 첫 토큰 전에는 타이핑 인디케이터를 보여준다
+    const row = document.createElement("div");
+    row.className = "flex justify-start bubble-enter";
+    // 주의 : 말풍선은 whitespace-pre-wrap 이므로 태그 사이에 개행/들여쓰기를 넣으면 여백으로 렌더링된다
+    row.innerHTML = `<div class="max-w-[78%] md:max-w-[65%] bg-slate-800 border border-slate-700/60 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow"><span class="typing-indicator inline-flex gap-1 items-center py-1"><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span></span><span class="agent-text"></span></div>`;
+    messageFeed.appendChild(row);
+    scrollFeedToBottom();
+    return {
+        appendText : (chunkText) => {
+            const agentText = row.querySelector(".agent-text");
+            if (agentText.textContent === "") chunkText = chunkText.replace(/^\s+/, "");  // 선두 개행/공백 제거 (whitespace-pre-wrap 말풍선 부풀림 방지)
+            if (chunkText === "") return;
+            const indicator = row.querySelector(".typing-indicator");
+            if (indicator) indicator.remove();
+            agentText.textContent += chunkText;
+            scrollFeedToBottom();
+        },
+        finalize : () => {
+            // 스트림 종료 시 : 후행 개행/공백 제거 + 빈 응답이면 인디케이터 대신 플레이스홀더 표시
+            const indicator = row.querySelector(".typing-indicator");
+            if (indicator) indicator.remove();
+            const agentText = row.querySelector(".agent-text");
+            agentText.textContent = agentText.textContent.replace(/\s+$/, "");
+            if (agentText.textContent === "") {
+                agentText.textContent = "(빈 응답 — 모델이 텍스트를 생성하지 않았습니다)";
+                agentText.classList.add("text-slate-500", "italic");
+            }
+        },
+        markError : (errorText) => {
+            const indicator = row.querySelector(".typing-indicator");
+            if (indicator) indicator.remove();
+            const agentText = row.querySelector(".agent-text");
+            agentText.textContent = errorText;
+            agentText.classList.add("text-red-400");
+            scrollFeedToBottom();
+        }
+    };
+}
+
+/* ══════════════════ 전송 + 스트리밍 수신 ══════════════════ */
+
+async function sendMessage() {
+    const apiUrl   = document.getElementById("api-url").value.trim().replace(/\/+$/, "");
+    const threadId = document.getElementById("thread-id").value.trim();
+    const message  = chatInput.value.trim();
+    if (!message || isStreaming) return;
+    if (!threadId) { appendSystemNotice("Thread ID 가 비어 있습니다. 세션 초기화로 생성하세요."); return; }
+
+    // ① 사용자 메시지를 즉시 렌더링하고 입력창을 비운다
+    appendUserBubble(message);
+    chatInput.value        = "";
+    chatInput.style.height = "auto";
+    isStreaming            = true;
+    sendButton.disabled    = true;
+    setStatus("응답 중", "bg-emerald-400 animate-pulse");
+    syncHeaderThreadId();
+
+    // ② 어시스턴트 말풍선을 미리 생성하고 스트리밍 텍스트를 누적한다
+    const agentBubble = appendAgentBubble();
+
+    try {
+        const response = await fetch(`${apiUrl}/stream`, {
+            method  : "POST",
+            headers : { "Content-Type" : "application/json" },
+            body    : JSON.stringify({ thread_id : threadId, message : message })
+        });
+        if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+
+        const streamReader = response.body.getReader();
+        const textDecoder  = new TextDecoder("utf-8");
+        while (true) {
+            const { done, value } = await streamReader.read();
+            if (done) break;
+            agentBubble.appendText(textDecoder.decode(value, { stream : true }));
+        }
+        agentBubble.finalize();
+        setStatus("대기", "bg-slate-600");
+    } catch (error) {
+        agentBubble.markError(`응답 실패 : ${error.message} — 백엔드가 실행 중인지 확인하세요.`);
+        setStatus("오류", "bg-red-500");
+    } finally {
+        isStreaming         = false;
+        sendButton.disabled = false;
+        chatInput.focus();
+    }
+}
+
+/* ══════════════════ 입력 UX ══════════════════ */
+
+// Enter 전송 / Shift+Enter 줄바꿈
+chatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+    }
+});
+
+// textarea 자동 높이
+chatInput.addEventListener("input", () => {
+    chatInput.style.height = "auto";
+    chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + "px";
+});
+
+// Thread ID 수동 변경 시 상단 바 동기화
+document.getElementById("thread-id").addEventListener("input", syncHeaderThreadId);
+
+/* ══════════════════ 초기화 ══════════════════ */
+document.getElementById("thread-id").value = crypto.randomUUID();
+syncHeaderThreadId();
+chatInput.focus();
+</script>
+</body>
+</html>

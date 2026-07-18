@@ -114,10 +114,12 @@ class ThinkTrimmingMiddleware(AgentMiddleware):
 
 def _create_compiled_graph(checkpoint_saver):
     model_configuration = ModelConfiguration(
-        provider          = os.getenv("MODEL_PROVIDER", "ollama"),
-        model_name        = os.getenv("MODEL_NAME", "qwen3-vl:4b"),
-        base_url          = os.getenv("MODEL_BASE_URL", "http://localhost:11434"),
-        reasoning_enabled = False   # think 파라미터 지원 모델에서는 생각 토큰 생성을 원천 차단 (thinking 전용 변형은 무시함)
+        provider            = os.getenv("MODEL_PROVIDER", "ollama"),
+        model_name          = os.getenv("MODEL_NAME", "qwen3-vl:4b"),
+        base_url            = os.getenv("MODEL_BASE_URL", "http://localhost:11434"),
+        reasoning_enabled   = False,  # think 파라미터 지원 모델에서는 생각 토큰 생성을 원천 차단 (thinking 전용 변형은 무시함)
+        context_token_count = int(os.getenv("MODEL_CONTEXT_TOKEN_COUNT", "8192")),   # Ollama 기본 4096 은 deepagents 프롬프트+히스토리에 부족 → 절단 → thinking 폭주
+        maximum_token_count = int(os.getenv("MODEL_MAXIMUM_TOKEN_COUNT", "4096") or "4096")   # 폭주 시 생성 상한 (thinking 포함)
     )
     return DeepAgentFactory.create(
         model_configuration,

@@ -19,6 +19,7 @@ class ModelConfiguration:
     default_header_dictionary : Optional[Dict[str, str]] = None  # 커스텀 헤더 (vLLM 사내 인증 등) (기본값 : None)
     extra_body_dictionary     : Optional[Dict[str, Any]] = None  # OpenAI 호환 확장 바디 (vLLM 전용 파라미터) (기본값 : None)
     reasoning_enabled         : Optional[bool]           = None  # 추론(thinking) 모드 : False=끔(지연 최소화), True=켬, None=모델 기본값 (현재 ollama 전용)
+    context_token_count       : Optional[int]            = None  # 컨텍스트 윈도우(num_ctx, ollama 전용) : 미설정 시 Ollama 기본 4096 — deepagents 시스템 프롬프트+히스토리가 이를 초과하면 프롬프트가 절단된다
 
     def __post_init__(self) -> None:
         if not isinstance(self.provider, str) or not self.provider.strip():
@@ -35,6 +36,8 @@ class ModelConfiguration:
             raise ValueError(f"INVALID MODEL TEMPERATURE : {self.temperature}")
         if self.maximum_token_count is not None and self.maximum_token_count <= 0:
             raise ValueError(f"INVALID MAXIMUM TOKEN COUNT : {self.maximum_token_count}")
+        if self.context_token_count is not None and self.context_token_count <= 0:
+            raise ValueError(f"INVALID CONTEXT TOKEN COUNT : {self.context_token_count}")
         if self.timeout_second_count <= 0.0:
             raise ValueError(f"INVALID MODEL TIMEOUT : {self.timeout_second_count}")
         if self.maximum_retry_count < 0:
