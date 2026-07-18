@@ -34,7 +34,7 @@ from app.llm.chat.chat_query_service                     import ChatQueryService
 from common.database.postgresql.postgresql_configuration import PostgresqlConfiguration
 from common.cache.redis_stream.redis_configuration       import RedisConfiguration
 from app.llm.agent.model_configuration                   import ModelConfiguration
-from app.orchestrator.agent.fake_compiled_graph          import FakeCompiledGraph
+from app.llm.agent.deep_agent_factory                    import DeepAgentFactory
 from app.orchestrator.api.orchestrator_api_router        import OrchestratorAPIRouter
 from app.orchestrator.service.chat_history_service       import ChatHistoryService
 from app.orchestrator.service.chunk_flush_service        import ChunkFlushService
@@ -116,12 +116,13 @@ class ServerApplication:
 
         # 오케스트레이터 도메인 (Redis 버퍼링 → llm_* 스키마 벌크 저장, 저장은 llm 리포지토리 재사용)
         # redis.asyncio 클라이언트는 첫 명령 시점에 지연 연결되므로 여기서 생성해도 안전하다 (연결 확인은 lifespan ping)
-        self.orchestrator_redis_client = ServerApplication._create_orchestrator_redis_client()
-        self.redis_chunk_buffer        = RedisChunkBuffer(self.orchestrator_redis_client)
-        self.chat_history_service      = ChatHistoryService(self.job_repository, self.job_message_repository)
-        self.chunk_flush_service       = ChunkFlushService(self.postgresql_pool_manager, self.redis_chunk_buffer, self.job_repository, self.job_message_repository, self.chat_thread_repository)
-        self.graph_stream_executor     = GraphStreamExecutor(self.redis_chunk_buffer)
-        self.orchestrator_api_router   = OrchestratorAPIRouter(FakeCompiledGraph(), self.uuid_v7_generator, self.chat_history_service, self.chunk_flush_service, self.graph_stream_executor, self.redis_chunk_buffer)  # 실제 서비스에서는 workflow.compile() 결과로 교체
+        self.orchestrator_redis_client    = ServerApplication._create_orchestrator_redis_client()
+        self.redis_chunk_buffer           = RedisChunkBuffer(self.orchestrator_redis_client)
+        self.chat_history_service         = ChatHistoryService(self.job_repository, self.job_message_repository)
+        self.chunk_flush_service          = ChunkFlushService(self.postgresql_pool_manager, self.redis_chunk_buffer, self.job_repository, self.job_message_repository, self.chat_thread_repository)
+        self.graph_stream_executor        = GraphStreamExecutor(self.redis_chunk_buffer)
+        self.orchestrator_compiled_graph  = DeepAgentFactory.create(ServerApplication._get_model_configuration())
+        self.orchestrator_api_router      = OrchestratorAPIRouter(self.orchestrator_compiled_graph, self.uuid_v7_generator, self.chat_history_service, self.chunk_flush_service, self.graph_stream_executor, self.redis_chunk_buffer)
 
         self.application = FastAPI(title = "LLM Job Service", lifespan = self.lifespan_async)
         self.application.include_router(self.llm_api_router.get_router())

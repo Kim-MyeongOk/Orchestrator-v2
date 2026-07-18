@@ -44,8 +44,12 @@ class ChunkSerializeHelper:
 
     @staticmethod
     def _parse_stream_chunk(stream_chunk : Any) -> Optional[Tuple[str, str, Any]]:
-        # subgraphs=True 이면 (namespace_tuple, stream_mode, payload) 3-tuple,
-        # 아니면 (stream_mode, payload) 2-tuple 로 도착한다. 형태를 통일 파싱한다.
+        # LangGraph 1.x 는 subgraphs=True + stream_mode 리스트 조합 시 {'type', 'ns', 'data'} dict 로 청크를 보낸다.
+        # 구버전 호환을 위해 (namespace_tuple, stream_mode, payload) 3-tuple / (stream_mode, payload) 2-tuple 도 함께 파싱한다.
+        if isinstance(stream_chunk, dict) and "type" in stream_chunk:
+            namespace_tuple = stream_chunk.get("ns") or ()
+            namespace_path  = "|".join(str(namespace) for namespace in namespace_tuple)
+            return namespace_path, str(stream_chunk.get("type")), stream_chunk.get("data")
         if isinstance(stream_chunk, tuple) and len(stream_chunk) == 3:
             namespace_tuple, chunk_type, payload = stream_chunk
             namespace_path = "|".join(str(namespace) for namespace in namespace_tuple)
