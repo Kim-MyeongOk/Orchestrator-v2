@@ -18,6 +18,7 @@ class ModelConfiguration:
     maximum_retry_count       : int                      = 2     # 최대 재시도 횟수 (기본값 : 2)
     default_header_dictionary : Optional[Dict[str, str]] = None  # 커스텀 헤더 (vLLM 사내 인증 등) (기본값 : None)
     extra_body_dictionary     : Optional[Dict[str, Any]] = None  # OpenAI 호환 확장 바디 (vLLM 전용 파라미터) (기본값 : None)
+    reasoning_enabled         : Optional[bool]           = None  # 추론(thinking) 모드 : False=끔(지연 최소화), True=켬, None=모델 기본값 (현재 ollama 전용)
 
     def __post_init__(self) -> None:
         if not isinstance(self.provider, str) or not self.provider.strip():

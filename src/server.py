@@ -17,38 +17,41 @@ from contextlib    import asynccontextmanager
 from typing        import AsyncIterator
 from redis.asyncio import Redis
 
-from common.database.postgresql.postgresql_pool_manager  import PostgresqlPoolManager
-from common.cache.redis_stream.redis_stream_client       import RedisStreamClient
-from common.identifier.uuid_v7.uuid_v7_generator         import UUIDV7Generator
-from app.llm.job.job_configuration                       import JobConfiguration
-from app.llm.repository.job_repository                   import JobRepository
-from app.llm.repository.job_message_repository           import JobMessageRepository
-from app.llm.repository.job_event_repository             import JobEventRepository
-from app.llm.repository.job_chunk_repository             import JobChunkRepository
-from app.llm.repository.job_task_repository              import JobTaskRepository
-from app.llm.repository.chat_thread_repository           import ChatThreadRepository
-from app.llm.repository.thread_message_repository        import ThreadMessageRepository
-from app.llm.repository.job_schema_initializer           import JobSchemaInitializer
-from app.llm.job.job_transfer.job_transfer               import JobTransfer
-from app.llm.job.job_executor.job_executor               import JobExecutor
-from app.llm.job.job_manager.job_manager                 import JobManager
-from app.llm.job.job_subscription.job_subscription       import JobSubscription
-from app.llm.job.job_manager.job_reaper                  import JobReaper
-from app.llm.api.llm_api_router                          import LLMAPIRouter
-from app.llm.api.chat_api_router                         import ChatAPIRouter
-from app.llm.chat.chat_query_service                     import ChatQueryService
-from common.database.postgresql.postgresql_configuration import PostgresqlConfiguration
-from common.cache.redis_stream.redis_configuration       import RedisConfiguration
-from app.llm.agent.model_configuration                   import ModelConfiguration
-from app.llm.agent.deep_agent_factory                    import DeepAgentFactory
-from app.llm.agent.tavily_search_tool_factory            import TavilySearchToolFactory
-from app.llm.agent.research_subagent_factory             import ResearchSubAgentFactory
-from app.orchestrator.api.orchestrator_api_router        import OrchestratorAPIRouter
+from common.database.postgresql.postgresql_pool_manager        import PostgresqlPoolManager
+from common.cache.redis_stream.redis_stream_client             import RedisStreamClient
+from common.identifier.uuid_v7.uuid_v7_generator               import UUIDV7Generator
+from app.llm.job.job_configuration                             import JobConfiguration
+from app.llm.repository.job_repository                         import JobRepository
+from app.llm.repository.job_message_repository                 import JobMessageRepository
+from app.llm.repository.job_event_repository                   import JobEventRepository
+from app.llm.repository.job_chunk_repository                   import JobChunkRepository
+from app.llm.repository.job_task_repository                    import JobTaskRepository
+from app.llm.repository.chat_thread_repository                 import ChatThreadRepository
+from app.llm.repository.thread_message_repository              import ThreadMessageRepository
+from app.llm.repository.job_schema_initializer                 import JobSchemaInitializer
+from app.llm.job.job_transfer.job_transfer                     import JobTransfer
+from app.llm.job.job_executor.job_executor                     import JobExecutor
+from app.llm.job.job_manager.job_manager                       import JobManager
+from app.llm.job.job_subscription.job_subscription             import JobSubscription
+from app.llm.job.job_manager.job_reaper                        import JobReaper
+from app.llm.api.llm_api_router                                import LLMAPIRouter
+from app.llm.api.chat_api_router                               import ChatAPIRouter
+from app.llm.chat.chat_query_service                           import ChatQueryService
+from common.database.postgresql.postgresql_configuration       import PostgresqlConfiguration
+from common.cache.redis_stream.redis_configuration             import RedisConfiguration
+from app.llm.agent.model_configuration                         import ModelConfiguration
+from app.llm.agent.deep_agent_factory                          import DeepAgentFactory
+from app.llm.agent.tavily_search_tool_factory                  import TavilySearchToolFactory
+from app.llm.agent.research_subagent_factory                   import ResearchSubAgentFactory
+from app.llm.agent.binary_storage                              import LocalFileBinaryStorage
+from app.llm.agent.image_attachment_interceptor                import ImageAttachmentInterceptor
+from app.llm.agent.image_reinjection_middleware                import ImageReinjectionMiddleware
+from app.orchestrator.api.orchestrator_api_router              import OrchestratorAPIRouter
 from app.orchestrator.repository.checkpoint_schema_initializer import CheckpointSchemaInitializer
-from app.orchestrator.service.chat_history_service       import ChatHistoryService
-from app.orchestrator.service.chunk_flush_service        import ChunkFlushService
-from app.orchestrator.service.graph_stream_executor      import GraphStreamExecutor
-from app.orchestrator.service.redis_chunk_buffer         import RedisChunkBuffer
+from app.orchestrator.service.chat_history_service             import ChatHistoryService
+from app.orchestrator.service.chunk_flush_service              import ChunkFlushService
+from app.orchestrator.service.graph_stream_executor            import GraphStreamExecutor
+from app.orchestrator.service.redis_chunk_buffer               import RedisChunkBuffer
 
 class ServerApplication:
     def __init__(self) -> None:
@@ -138,8 +141,13 @@ class ServerApplication:
         self.checkpoint_schema_initializer = CheckpointSchemaInitializer(self.postgresql_pool_manager, self.checkpoint_partition_count)
         self.checkpoint_connection_pool   = None  # psycopg AsyncConnectionPool (lifespan 에서 생성/종료)
 
+        # 이미지 격리 파이프라인 : 라우터에서 격리(detach) → 체크포인트에는 참조만 → 모델 직전 재주입(reinject)
+        # 이미지 입력이 없는 현재는 전 구간 무비용 패스스루로 동작한다
+        self.binary_storage               = LocalFileBinaryStorage(os.getenv("ATTACHMENT_STORAGE_DIRECTORY", "./attachment_storage"))
+        self.image_attachment_interceptor = ImageAttachmentInterceptor(self.binary_storage, detach_minimum_byte_count = int(os.getenv("ATTACHMENT_DETACH_MINIMUM_BYTE_COUNT", "4096")))
+
         self.orchestrator_compiled_graph  = self._create_orchestrator_compiled_graph()
-        self.orchestrator_api_router      = OrchestratorAPIRouter(self.orchestrator_compiled_graph, self.uuid_v7_generator, self.chat_history_service, self.chunk_flush_service, self.graph_stream_executor, self.redis_chunk_buffer, self.is_checkpoint_enabled)
+        self.orchestrator_api_router      = OrchestratorAPIRouter(self.orchestrator_compiled_graph, self.uuid_v7_generator, self.chat_history_service, self.chunk_flush_service, self.graph_stream_executor, self.redis_chunk_buffer, self.is_checkpoint_enabled, self.image_attachment_interceptor)
 
         self.application = FastAPI(title = "LLM Job Service", lifespan = self.lifespan_async)
         self.application.include_router(self.llm_api_router.get_router())
@@ -209,7 +217,8 @@ class ServerApplication:
             timeout_second_count      = float(os.getenv("MODEL_TIMEOUT_SECOND_COUNT", "120.0")),
             maximum_retry_count       = int(os.getenv("MODEL_MAXIMUM_RETRY_COUNT", "2")),
             default_header_dictionary = default_header_dictionary,
-            extra_body_dictionary     = ServerApplication._get_optional_dictionary("MODEL_EXTRA_BODY")
+            extra_body_dictionary     = ServerApplication._get_optional_dictionary("MODEL_EXTRA_BODY"),
+            reasoning_enabled         = ServerApplication._get_boolean("MODEL_REASONING_ENABLED", False)
         )
 
     def _create_orchestrator_compiled_graph(self, checkpointer = None):
@@ -220,9 +229,10 @@ class ServerApplication:
         tool_list     = [search_tool] if search_tool is not None else None
         return DeepAgentFactory.create(
             ServerApplication._get_model_configuration(),
-            tool_list     = tool_list,
-            checkpointer  = checkpointer,
-            subagent_list = subagent_list
+            tool_list       = tool_list,
+            checkpointer    = checkpointer,
+            subagent_list   = subagent_list,
+            middleware_list = [ImageReinjectionMiddleware(self.image_attachment_interceptor)]
         )
 
     async def _initialize_checkpointer_async(self) -> None:

@@ -34,23 +34,38 @@ from app.orchestrator.service.redis_chunk_buffer      import RedisChunkBuffer
 
 
 class OrchestratorAPIRouter:
-    def __init__(self, compiled_graph : Any, uuid_v7_generator : UUIDV7Generator, chat_history_service : ChatHistoryService, chunk_flush_service : ChunkFlushService, graph_stream_executor : GraphStreamExecutor, redis_chunk_buffer : RedisChunkBuffer, is_checkpoint_enabled : bool = False):
-        # compiled_graph        : workflow.compile() 결과(CompiledStateGraph). 체크포인트 활성 시 lifespan 에서 체크포인터 주입본으로 교체된다
-        # is_checkpoint_enabled : True 면 LangGraph 체크포인터가 thread_id 로 상태를 복원하므로 수동 이력 복원을 건너뛴다 (이중 주입 방지)
-        self.compiled_graph        = compiled_graph
-        self.uuid_v7_generator     = uuid_v7_generator
-        self.chat_history_service  = chat_history_service
-        self.chunk_flush_service   = chunk_flush_service
-        self.graph_stream_executor = graph_stream_executor
-        self.redis_chunk_buffer    = redis_chunk_buffer
-        self.is_checkpoint_enabled = is_checkpoint_enabled
+    def __init__(self, compiled_graph : Any, uuid_v7_generator : UUIDV7Generator, chat_history_service : ChatHistoryService, chunk_flush_service : ChunkFlushService, graph_stream_executor : GraphStreamExecutor, redis_chunk_buffer : RedisChunkBuffer, is_checkpoint_enabled : bool = False, image_attachment_interceptor : Any = None):
+        # compiled_graph               : workflow.compile() 결과(CompiledStateGraph). 체크포인트 활성 시 lifespan 에서 체크포인터 주입본으로 교체된다
+        # is_checkpoint_enabled        : True 면 LangGraph 체크포인터가 thread_id 로 상태를 복원하므로 수동 이력 복원을 건너뛴다 (이중 주입 방지)
+        # image_attachment_interceptor : 그래프 입력 직전 Base64 이미지를 스토리지로 격리해 State/체크포인트에는 참조만 남긴다 (None 이면 비활성)
+        self.compiled_graph               = compiled_graph
+        self.uuid_v7_generator            = uuid_v7_generator
+        self.chat_history_service         = chat_history_service
+        self.chunk_flush_service          = chunk_flush_service
+        self.graph_stream_executor        = graph_stream_executor
+        self.redis_chunk_buffer           = redis_chunk_buffer
+        self.is_checkpoint_enabled        = is_checkpoint_enabled
+        self.image_attachment_interceptor = image_attachment_interceptor
         self.api_router            = APIRouter(prefix = "/api/v1/orchestrator", tags = ["orchestrator"])
         self.api_router.add_api_route("/stream", self.stream_orchestrator_async, methods = ["POST"])
 
+    async def _get_checkpoint_count_async(self, thread_id : uuid.UUID) -> int:
+        # 개발용 관측 : 해당 스레드의 체크포인트 행 수를 직접 조회한다 (checkpoints.thread_id 는 TEXT 컬럼)
+        async with self.chunk_flush_service.postgresql_pool_manager.get_pool().acquire() as connection:
+            return int(await connection.fetchval("SELECT count(*) FROM checkpoints WHERE thread_id = $1", str(thread_id)))
+
     async def _create_sse_stream_async(self, thread_id : uuid.UUID, run_id : uuid.UUID, user_id : uuid.UUID, input_message_list : List[Any], initial_input_dictionary : Dict[str, Any], started_at : datetime) -> AsyncIterator[str]:
-        event_sequence_number = 0
-        is_stream_finished    = False
+        event_sequence_number   = 0
+        is_stream_finished      = False
+        checkpoint_count_before = 0
         try:
+            # [개발용 print] 요청 시작 시점 : 체크포인트에서 복원된 메시지 수 + 현재 체크포인트 행 수
+            # 1회차 호출 → "0 MESSAGES RESTORED - 0 CHECKPOINTS", 2회차 호출 → 복원 수/누적 수가 증가해 있어야 한다
+            if self.is_checkpoint_enabled:
+                restored_message_count  = len((await self.compiled_graph.aget_state({"configurable" : {"thread_id" : str(thread_id)}})).values.get("messages", []))
+                checkpoint_count_before = await self._get_checkpoint_count_async(thread_id)
+                print(f"CHECKPOINT RESTORED : THREAD {thread_id} - {restored_message_count} MESSAGES RESTORED - {checkpoint_count_before} CHECKPOINTS", flush = True)
+
             yield SseHelper.format_event(event_name = "start", data_dictionary = {"run_id" : str(run_id), "thread_id" : str(thread_id)})
 
             # 각 청크는 executor 내부에서 Redis 에 실시간 누적(Append)되는 동시에 SSE 로 yield 된다
@@ -62,6 +77,12 @@ class OrchestratorAPIRouter:
             # 스트리밍이 예외 없이 정상 종료된 순간, 동일 요청 컨텍스트에서 즉시 flush 한다.
             # asyncio.shield : flush 도중 클라이언트가 끊겨도 저장 처리만은 끝까지 실행한다.
             await asyncio.shield(self.chunk_flush_service.flush_buffer_to_postgres_async(thread_id, run_id, user_id, initial_input_dictionary, started_at))
+
+            # [개발용 print] 스트림 완료 시점 : 이번 실행으로 체크포인트가 몇 개 누적됐는지 (개수 증가 여부)
+            if self.is_checkpoint_enabled:
+                checkpoint_count_after = await self._get_checkpoint_count_async(thread_id)
+                print(f"CHECKPOINT ACCUMULATED : THREAD {thread_id} - {checkpoint_count_before} -> {checkpoint_count_after} CHECKPOINTS (+{checkpoint_count_after - checkpoint_count_before})", flush = True)
+
             yield SseHelper.format_event(event_name = "done", data_dictionary = {"run_id" : str(run_id), "status" : "completed"})
         except Exception as exception:
             # 런타임 에러 : 클라이언트에 에러 이벤트를 전송하고 스트림을 닫는다
@@ -92,6 +113,11 @@ class OrchestratorAPIRouter:
 
         # ③ 복원 이력 + 신규 메시지로 그래프 입력을 구성한다
         input_message_list       = history_message_list + [HumanMessage(content = stream_request.user_message)]
+
+        # ④ 이미지 격리(Detachment) : Base64 이미지를 스토리지로 빼고 참조 블록만 State 로 보낸다.
+        #    텍스트 전용 메시지는 무비용 통과. 재주입은 모델 직전 ImageReinjectionMiddleware 가 수행한다.
+        if self.image_attachment_interceptor is not None:
+            input_message_list = await self.image_attachment_interceptor.detach_image_from_message_list_async(input_message_list)
         initial_input_dictionary = {"messages" : [{"role" : "human", "content" : stream_request.user_message}]}
 
         sse_stream = self._create_sse_stream_async(thread_id, run_id, x_user_id, input_message_list, initial_input_dictionary, started_at)
