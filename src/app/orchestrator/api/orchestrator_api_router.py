@@ -34,16 +34,18 @@ from app.orchestrator.service.redis_chunk_buffer      import RedisChunkBuffer
 
 
 class OrchestratorAPIRouter:
-    def __init__(self, compiled_graph : Any, uuid_v7_generator : UUIDV7Generator, chat_history_service : ChatHistoryService, chunk_flush_service : ChunkFlushService, graph_stream_executor : GraphStreamExecutor, redis_chunk_buffer : RedisChunkBuffer, is_checkpoint_enabled : bool = False):
-        # compiled_graph        : workflow.compile() 결과(CompiledStateGraph). 체크포인트 활성 시 lifespan 에서 체크포인터 주입본으로 교체된다
-        # is_checkpoint_enabled : True 면 LangGraph 체크포인터가 thread_id 로 상태를 복원하므로 수동 이력 복원을 건너뛴다 (이중 주입 방지)
-        self.compiled_graph        = compiled_graph
-        self.uuid_v7_generator     = uuid_v7_generator
-        self.chat_history_service  = chat_history_service
-        self.chunk_flush_service   = chunk_flush_service
-        self.graph_stream_executor = graph_stream_executor
-        self.redis_chunk_buffer    = redis_chunk_buffer
-        self.is_checkpoint_enabled = is_checkpoint_enabled
+    def __init__(self, compiled_graph : Any, uuid_v7_generator : UUIDV7Generator, chat_history_service : ChatHistoryService, chunk_flush_service : ChunkFlushService, graph_stream_executor : GraphStreamExecutor, redis_chunk_buffer : RedisChunkBuffer, is_checkpoint_enabled : bool = False, image_attachment_interceptor : Any = None):
+        # compiled_graph               : workflow.compile() 결과(CompiledStateGraph). 체크포인트 활성 시 lifespan 에서 체크포인터 주입본으로 교체된다
+        # is_checkpoint_enabled        : True 면 LangGraph 체크포인터가 thread_id 로 상태를 복원하므로 수동 이력 복원을 건너뛴다 (이중 주입 방지)
+        # image_attachment_interceptor : 그래프 입력 직전 Base64 이미지를 스토리지로 격리해 State/체크포인트에는 참조만 남긴다 (None 이면 비활성)
+        self.compiled_graph               = compiled_graph
+        self.uuid_v7_generator            = uuid_v7_generator
+        self.chat_history_service         = chat_history_service
+        self.chunk_flush_service          = chunk_flush_service
+        self.graph_stream_executor        = graph_stream_executor
+        self.redis_chunk_buffer           = redis_chunk_buffer
+        self.is_checkpoint_enabled        = is_checkpoint_enabled
+        self.image_attachment_interceptor = image_attachment_interceptor
         self.api_router            = APIRouter(prefix = "/api/v1/orchestrator", tags = ["orchestrator"])
         self.api_router.add_api_route("/stream", self.stream_orchestrator_async, methods = ["POST"])
 
@@ -111,6 +113,11 @@ class OrchestratorAPIRouter:
 
         # ③ 복원 이력 + 신규 메시지로 그래프 입력을 구성한다
         input_message_list       = history_message_list + [HumanMessage(content = stream_request.user_message)]
+
+        # ④ 이미지 격리(Detachment) : Base64 이미지를 스토리지로 빼고 참조 블록만 State 로 보낸다.
+        #    텍스트 전용 메시지는 무비용 통과. 재주입은 모델 직전 ImageReinjectionMiddleware 가 수행한다.
+        if self.image_attachment_interceptor is not None:
+            input_message_list = await self.image_attachment_interceptor.detach_image_from_message_list_async(input_message_list)
         initial_input_dictionary = {"messages" : [{"role" : "human", "content" : stream_request.user_message}]}
 
         sse_stream = self._create_sse_stream_async(thread_id, run_id, x_user_id, input_message_list, initial_input_dictionary, started_at)
