@@ -24,27 +24,44 @@
 
 <div class="h-full flex flex-col md:flex-row">
 
-    <!-- ══════════ 좌측 사이드바 : 세션 설정 ══════════ -->
-    <aside class="md:w-72 shrink-0 bg-slate-900/80 border-b md:border-b-0 md:border-r border-slate-800 p-4 md:p-5 space-y-4 md:space-y-5">
-        <div class="flex items-center gap-2.5">
-            <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-sm font-bold shadow-lg shadow-indigo-950">O</div>
-            <div>
-                <h1 class="text-sm font-semibold tracking-tight">Orchestrator Chat</h1>
-                <p class="text-[10px] text-slate-500">LangGraph 체크포인트 대화</p>
+    <!-- ══════════ 좌측 사이드바 : 채팅방 목록 + 세션 설정 ══════════ -->
+    <aside class="md:w-72 shrink-0 bg-slate-900/80 border-b md:border-b-0 md:border-r border-slate-800 flex flex-col max-h-56 md:max-h-none">
+        <div class="p-4 md:p-5 pb-3 space-y-4">
+            <div class="flex items-center gap-2.5">
+                <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-sm font-bold shadow-lg shadow-indigo-950">O</div>
+                <div>
+                    <h1 class="text-sm font-semibold tracking-tight">Orchestrator Chat</h1>
+                    <p class="text-[10px] text-slate-500">LangGraph 체크포인트 대화</p>
+                </div>
             </div>
+
+            <button onclick="createRoom()"
+                    class="w-full py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-semibold transition shadow-lg shadow-indigo-950/40">
+                ＋ 새 채팅방
+            </button>
         </div>
 
-        <div class="space-y-3.5">
+        <!-- 채팅방 목록 -->
+        <nav id="room-list" class="chat-scroll flex-1 overflow-y-auto px-3 space-y-1 min-h-0"></nav>
+
+        <!-- 세션 설정 -->
+        <div class="p-4 md:p-5 pt-3 space-y-3 border-t border-slate-800/70">
+            <div>
+                <label class="block text-[11px] font-medium text-slate-400 mb-1.5">모델</label>
+                <select id="model-select" onchange="onModelChanged()"
+                        class="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+                    <option value="">(기본 모델)</option>
+                </select>
+            </div>
             <div>
                 <label class="block text-[11px] font-medium text-slate-400 mb-1.5">백엔드 API URL</label>
                 <input id="api-url" type="text" value="http://localhost:8002"
                        class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
             </div>
             <div>
-                <label class="block text-[11px] font-medium text-slate-400 mb-1.5">Thread ID</label>
-                <input id="thread-id" type="text"
-                       class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
-                <p class="text-[10px] text-slate-600 mt-1.5 leading-relaxed">같은 Thread ID 로 보내면 체크포인트가 이전 대화를 복원합니다.</p>
+                <label class="block text-[11px] font-medium text-slate-400 mb-1.5">Thread ID <span class="text-slate-600">(현재 방)</span></label>
+                <input id="thread-id" type="text" readonly
+                       class="w-full bg-slate-950/60 border border-slate-800 rounded-lg px-3 py-2 text-[10px] font-mono text-slate-500 focus:outline-none">
             </div>
             <button onclick="resetSession()"
                     class="w-full py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-medium text-slate-300 transition">
@@ -59,8 +76,10 @@
         <!-- 상단 바 -->
         <header class="shrink-0 h-14 px-4 md:px-6 bg-slate-900/60 border-b border-slate-800 flex items-center justify-between backdrop-blur">
             <div class="flex items-center gap-2 min-w-0">
-                <span class="text-[11px] text-slate-500 shrink-0">Thread</span>
-                <code id="header-thread-id" class="text-[11px] text-slate-300 font-mono truncate">—</code>
+                <span id="header-room-title" class="text-xs font-medium text-slate-200 truncate max-w-[180px]">—</span>
+                <span class="text-slate-700">·</span>
+                <code id="header-thread-id" class="text-[11px] text-slate-500 font-mono truncate">—</code>
+                <span id="header-model" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 shrink-0">기본 모델</span>
             </div>
             <div class="flex items-center gap-2 shrink-0">
                 <span id="status-dot" class="w-2 h-2 rounded-full bg-slate-600"></span>
@@ -69,12 +88,7 @@
         </header>
 
         <!-- 중앙 대화창 -->
-        <div id="message-feed" class="chat-scroll flex-1 overflow-y-auto px-4 md:px-6 py-5 space-y-4">
-            <div class="text-center pt-10">
-                <p class="text-slate-600 text-sm">메시지를 보내 오케스트레이터와 대화를 시작하세요.</p>
-                <p class="text-slate-700 text-[11px] mt-1.5">백엔드 : <code class="font-mono">python src/think_bottleneck_monitor.py</code> (포트 8002)</p>
-            </div>
-        </div>
+        <div id="message-feed" class="chat-scroll flex-1 overflow-y-auto px-4 md:px-6 py-5 space-y-4"></div>
 
         <!-- 하단 입력 바 -->
         <footer class="shrink-0 border-t border-slate-800 bg-slate-900/60 backdrop-blur p-3 md:p-4">
@@ -91,32 +105,171 @@
 </div>
 
 <script>
-/* ══════════════════ 상태 ══════════════════ */
+/* ══════════════════ 채팅방 상태 (localStorage 영속화) ══════════════════ */
 
-let isStreaming = false;
+const ROOM_STORAGE_KEY = "orchestrator_chat_rooms_v1";
 
-const messageFeed  = document.getElementById("message-feed");
-const chatInput    = document.getElementById("chat-input");
-const sendButton   = document.getElementById("send-button");
+let roomList      = [];     // [{roomId, threadId, title, model, messages: [{role: "user"|"agent"|"error", text}]}]
+let activeRoomId  = null;
+let isStreaming   = false;
 
-/* ══════════════════ 세션 ══════════════════ */
+const messageFeed = document.getElementById("message-feed");
+const chatInput   = document.getElementById("chat-input");
+const sendButton  = document.getElementById("send-button");
+
+function saveRooms() {
+    localStorage.setItem(ROOM_STORAGE_KEY, JSON.stringify({ roomList, activeRoomId }));
+}
+
+function loadRooms() {
+    try {
+        const stored = JSON.parse(localStorage.getItem(ROOM_STORAGE_KEY));
+        if (stored && Array.isArray(stored.roomList) && stored.roomList.length > 0) {
+            roomList     = stored.roomList;
+            activeRoomId = stored.roomList.some(room => room.roomId === stored.activeRoomId) ? stored.activeRoomId : stored.roomList[0].roomId;
+            return;
+        }
+    } catch (_ignored) {}
+    roomList = [];
+    createRoom();   // 저장된 방이 없으면 첫 방 자동 생성
+}
+
+function getActiveRoom() { return roomList.find(room => room.roomId === activeRoomId); }
+
+function createRoom() {
+    const room = { roomId : crypto.randomUUID(), threadId : crypto.randomUUID(), title : "새 대화", model : "", messages : [] };
+    roomList.unshift(room);
+    activeRoomId = room.roomId;
+    saveRooms();
+    renderRoomList();
+    renderActiveRoom();
+}
+
+function switchRoom(roomId) {
+    if (isStreaming) return;   // 스트리밍 중 방 전환 방지 (응답이 다른 방에 섞이는 것을 막는다)
+    activeRoomId = roomId;
+    saveRooms();
+    renderRoomList();
+    renderActiveRoom();
+}
+
+function deleteRoom(event, roomId) {
+    event.stopPropagation();
+    if (isStreaming) return;
+    roomList = roomList.filter(room => room.roomId !== roomId);
+    if (roomList.length === 0) { createRoom(); return; }
+    if (activeRoomId === roomId) activeRoomId = roomList[0].roomId;
+    saveRooms();
+    renderRoomList();
+    renderActiveRoom();
+}
+
+function resetSession() {
+    // 현재 방의 Thread 를 새로 발급 (체크포인트와 분리된 새 대화) + 메시지 피드 초기화
+    if (isStreaming) return;
+    const room = getActiveRoom();
+    room.threadId = crypto.randomUUID();
+    room.messages = [];
+    room.title    = "새 대화";
+    saveRooms();
+    renderRoomList();
+    renderActiveRoom();
+    appendSystemNotice("새 세션이 시작되었습니다. 이전 체크포인트와 분리된 새 Thread 입니다.");
+}
+
+/* ══════════════════ 렌더링 ══════════════════ */
+
+function renderRoomList() {
+    const roomListElement = document.getElementById("room-list");
+    roomListElement.innerHTML = "";
+    for (const room of roomList) {
+        const isActive = room.roomId === activeRoomId;
+        const item = document.createElement("div");
+        item.className = `group flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition text-xs ${isActive ? "bg-slate-800 border border-slate-700 text-slate-100" : "text-slate-400 hover:bg-slate-800/60 border border-transparent"}`;
+        item.onclick   = () => switchRoom(room.roomId);
+
+        const title = document.createElement("span");
+        title.className   = "flex-1 truncate";
+        title.textContent = room.title;
+
+        const modelTag = document.createElement("span");
+        modelTag.className   = "text-[9px] text-slate-600 shrink-0";
+        modelTag.textContent = room.model ? room.model.split(":")[0] : "";
+
+        const deleteButton = document.createElement("button");
+        deleteButton.className   = "shrink-0 w-5 h-5 rounded flex items-center justify-center text-slate-600 hover:text-red-400 hover:bg-slate-700/60 opacity-0 group-hover:opacity-100 transition";
+        deleteButton.textContent = "✕";
+        deleteButton.title       = "채팅방 삭제";
+        deleteButton.onclick     = (event) => deleteRoom(event, room.roomId);
+
+        item.append(title, modelTag, deleteButton);
+        roomListElement.appendChild(item);
+    }
+}
+
+function renderActiveRoom() {
+    const room = getActiveRoom();
+    document.getElementById("thread-id").value              = room.threadId;
+    document.getElementById("header-thread-id").textContent = room.threadId.slice(0, 13) + "…";
+    document.getElementById("header-room-title").textContent = room.title;
+    document.getElementById("header-model").textContent      = room.model || "기본 모델";
+    document.getElementById("model-select").value            = room.model;
+    setStatus("대기", "bg-slate-600");
+
+    messageFeed.innerHTML = "";
+    if (room.messages.length === 0) {
+        messageFeed.innerHTML = `<div class="text-center pt-10">
+            <p class="text-slate-600 text-sm">메시지를 보내 오케스트레이터와 대화를 시작하세요.</p>
+            <p class="text-slate-700 text-[11px] mt-1.5">백엔드 : <code class="font-mono">python src/think_bottleneck_monitor.py</code> (포트 8002)</p></div>`;
+        return;
+    }
+    for (const storedMessage of room.messages) {
+        if (storedMessage.role === "user")       appendUserBubble(storedMessage.text, false);
+        else if (storedMessage.role === "error") appendAgentBubble().markError(storedMessage.text);
+        else                                     { const bubble = appendAgentBubble(); bubble.appendText(storedMessage.text); bubble.finalize(); }
+    }
+    scrollFeedToBottom();
+}
+
+function onModelChanged() {
+    const room = getActiveRoom();
+    room.model = document.getElementById("model-select").value;
+    document.getElementById("header-model").textContent = room.model || "기본 모델";
+    saveRooms();
+    renderRoomList();
+}
+
+async function loadModelOptions(retryCount = 5) {
+    // 백엔드 GET /models 로 Ollama 설치 모델을 드롭다운에 채운다.
+    // 백엔드보다 페이지를 먼저 연 경우를 위해 실패 시 3초 간격으로 재시도한다 (최종 실패 시 기본 모델로 동작)
+    const apiUrl = document.getElementById("api-url").value.trim().replace(/\/+$/, "");
+    try {
+        const response = await fetch(`${apiUrl}/models`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result      = await response.json();
+        const modelSelect = document.getElementById("model-select");
+        modelSelect.innerHTML = `<option value="">(기본 : ${result.default_model})</option>`;
+        for (const modelName of result.models) {
+            const option = document.createElement("option");
+            option.value = modelName;
+            option.textContent = modelName;
+            modelSelect.appendChild(option);
+        }
+        modelSelect.value = getActiveRoom()?.model || "";
+    } catch (error) {
+        if (retryCount > 0) { setTimeout(() => loadModelOptions(retryCount - 1), 3000); return; }
+        appendSystemNotice(`모델 목록 로드 실패 (${error.message}) — 기본 모델로 동작합니다.`);
+    }
+}
+
+/* ══════════════════ 말풍선 렌더링 ══════════════════ */
 
 function setStatus(text, colorClass) {
     document.getElementById("status-text").textContent = text;
     document.getElementById("status-dot").className    = `w-2 h-2 rounded-full ${colorClass}`;
 }
 
-function syncHeaderThreadId() {
-    document.getElementById("header-thread-id").textContent = document.getElementById("thread-id").value || "—";
-}
-
-function resetSession() {
-    document.getElementById("thread-id").value = crypto.randomUUID();
-    syncHeaderThreadId();
-    messageFeed.innerHTML = "";
-    appendSystemNotice("새 세션이 시작되었습니다. 이전 체크포인트와 분리된 새 Thread 입니다.");
-    setStatus("대기", "bg-slate-600");
-}
+function scrollFeedToBottom() { messageFeed.scrollTop = messageFeed.scrollHeight; }
 
 function appendSystemNotice(text) {
     const notice = document.createElement("div");
@@ -126,15 +279,10 @@ function appendSystemNotice(text) {
     scrollFeedToBottom();
 }
 
-/* ══════════════════ 말풍선 렌더링 ══════════════════ */
-
-function scrollFeedToBottom() { messageFeed.scrollTop = messageFeed.scrollHeight; }
-
-function appendUserBubble(text) {
+function appendUserBubble(text, animate = true) {
     const row = document.createElement("div");
-    row.className = "flex justify-end bubble-enter";
-    row.innerHTML = `
-        <div class="max-w-[78%] md:max-w-[65%] bg-slate-700 rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow"></div>`;
+    row.className = "flex justify-end" + (animate ? " bubble-enter" : "");
+    row.innerHTML = `<div class="max-w-[78%] md:max-w-[65%] bg-slate-700 rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow"></div>`;
     row.firstElementChild.textContent = text;
     messageFeed.appendChild(row);
     scrollFeedToBottom();
@@ -168,6 +316,7 @@ function appendAgentBubble() {
                 agentText.textContent = "(빈 응답 — 모델이 텍스트를 생성하지 않았습니다)";
                 agentText.classList.add("text-slate-500", "italic");
             }
+            return agentText.textContent;
         },
         markError : (errorText) => {
             const indicator = row.querySelector(".typing-indicator");
@@ -183,20 +332,21 @@ function appendAgentBubble() {
 /* ══════════════════ 전송 + 스트리밍 수신 ══════════════════ */
 
 async function sendMessage() {
-    const apiUrl   = document.getElementById("api-url").value.trim().replace(/\/+$/, "");
-    const threadId = document.getElementById("thread-id").value.trim();
-    const message  = chatInput.value.trim();
-    if (!message || isStreaming) return;
-    if (!threadId) { appendSystemNotice("Thread ID 가 비어 있습니다. 세션 초기화로 생성하세요."); return; }
+    const apiUrl  = document.getElementById("api-url").value.trim().replace(/\/+$/, "");
+    const message = chatInput.value.trim();
+    const room    = getActiveRoom();
+    if (!message || isStreaming || !room) return;
 
-    // ① 사용자 메시지를 즉시 렌더링하고 입력창을 비운다
+    // ① 사용자 메시지를 즉시 렌더링·저장하고 입력창을 비운다 (첫 메시지는 방 제목이 된다)
     appendUserBubble(message);
+    room.messages.push({ role : "user", text : message });
+    if (room.title === "새 대화") { room.title = message.slice(0, 24); renderRoomList(); document.getElementById("header-room-title").textContent = room.title; }
+    saveRooms();
     chatInput.value        = "";
     chatInput.style.height = "auto";
     isStreaming            = true;
     sendButton.disabled    = true;
     setStatus("응답 중", "bg-emerald-400 animate-pulse");
-    syncHeaderThreadId();
 
     // ② 어시스턴트 말풍선을 미리 생성하고 스트리밍 텍스트를 누적한다
     const agentBubble = appendAgentBubble();
@@ -205,7 +355,7 @@ async function sendMessage() {
         const response = await fetch(`${apiUrl}/stream`, {
             method  : "POST",
             headers : { "Content-Type" : "application/json" },
-            body    : JSON.stringify({ thread_id : threadId, message : message })
+            body    : JSON.stringify({ thread_id : room.threadId, message : message, model : room.model || null })
         });
         if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
 
@@ -216,10 +366,15 @@ async function sendMessage() {
             if (done) break;
             agentBubble.appendText(textDecoder.decode(value, { stream : true }));
         }
-        agentBubble.finalize();
+        const finalText = agentBubble.finalize();
+        room.messages.push({ role : "agent", text : finalText });
+        saveRooms();
         setStatus("대기", "bg-slate-600");
     } catch (error) {
-        agentBubble.markError(`응답 실패 : ${error.message} — 백엔드가 실행 중인지 확인하세요.`);
+        const errorText = `응답 실패 : ${error.message} — 백엔드가 실행 중인지 확인하세요.`;
+        agentBubble.markError(errorText);
+        room.messages.push({ role : "error", text : errorText });
+        saveRooms();
         setStatus("오류", "bg-red-500");
     } finally {
         isStreaming         = false;
@@ -244,12 +399,11 @@ chatInput.addEventListener("input", () => {
     chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + "px";
 });
 
-// Thread ID 수동 변경 시 상단 바 동기화
-document.getElementById("thread-id").addEventListener("input", syncHeaderThreadId);
-
 /* ══════════════════ 초기화 ══════════════════ */
-document.getElementById("thread-id").value = crypto.randomUUID();
-syncHeaderThreadId();
+loadRooms();
+renderRoomList();
+renderActiveRoom();
+loadModelOptions();
 chatInput.focus();
 </script>
 </body>

@@ -112,10 +112,11 @@ class ThinkTrimmingMiddleware(AgentMiddleware):
 # deepagents 체크포인트의 pending writes 를 적용하지 못해 messages 가 0 으로 보인다)
 ##################################################
 
-def _create_compiled_graph(checkpoint_saver):
+def _create_compiled_graph(checkpoint_saver, model_name : Optional[str] = None):
+    # model_name : 요청별 모델 선택 (None 이면 .env 기본 모델)
     model_configuration = ModelConfiguration(
         provider            = os.getenv("MODEL_PROVIDER", "ollama"),
-        model_name          = os.getenv("MODEL_NAME", "qwen3-vl:4b"),
+        model_name          = model_name or os.getenv("MODEL_NAME", "qwen3-vl:4b"),
         base_url            = os.getenv("MODEL_BASE_URL", "http://localhost:11434"),
         reasoning_enabled   = False,  # think 파라미터 지원 모델에서는 생각 토큰 생성을 원천 차단 (thinking 전용 변형은 무시함)
         context_token_count = int(os.getenv("MODEL_CONTEXT_TOKEN_COUNT", "8192")),   # Ollama 기본 4096 은 deepagents 프롬프트+히스토리에 부족 → 절단 → thinking 폭주
@@ -135,17 +136,40 @@ def _create_compiled_graph(checkpoint_saver):
 class StreamRequest(BaseModel):
     thread_id : str
     message   : str
+    model     : Optional[str] = None   # 요청별 모델 선택 (미지정 시 .env 기본 모델)
 
 
 class MonitorApplication:
     def __init__(self) -> None:
-        self.compiled_graph            = None
+        self.checkpoint_saver           = None
         self.checkpoint_connection_pool = None
+        self.compiled_graph_dictionary  = {}   # 모델명 → 컴파일 그래프 캐시 (요청별 모델 선택 지원, 체크포인터 공유)
         self.application               = FastAPI(title = "Think Bottleneck Monitor", lifespan = self._lifespan_async)
         # 로컬 진단 대시보드(frontend/index.html 을 file:// 로 직접 오픈)에서의 fetch 를 허용한다
         self.application.add_middleware(CORSMiddleware, allow_origins = ["*"], allow_methods = ["*"], allow_headers = ["*"])
         self.application.add_api_route("/diagnose", self.diagnose_thread_async, methods = ["GET"])
+        self.application.add_api_route("/models",   self.list_models_async,     methods = ["GET"])
         self.application.add_api_route("/stream",   self.stream_async,          methods = ["POST"])
+
+    def _get_or_create_compiled_graph(self, model_name : Optional[str]):
+        # 모델별 그래프를 지연 생성해 캐싱한다 (같은 체크포인터를 공유하므로 스레드 이력은 모델과 무관하게 이어진다)
+        cache_key = model_name or os.getenv("MODEL_NAME", "qwen3-vl:4b")
+        if cache_key not in self.compiled_graph_dictionary:
+            self.compiled_graph_dictionary[cache_key] = _create_compiled_graph(self.checkpoint_saver, cache_key)
+        return self.compiled_graph_dictionary[cache_key]
+
+    async def list_models_async(self) -> Dict[str, Any]:
+        # Ollama 에 설치된 모델 목록을 프록시한다 (프론트 모델 선택 드롭다운용)
+        import httpx
+        ollama_base_url = os.getenv("MODEL_BASE_URL", "http://localhost:11434")
+        try:
+            async with httpx.AsyncClient(timeout = 5.0) as http_client:
+                response = await http_client.get(f"{ollama_base_url}/api/tags")
+                response.raise_for_status()
+                model_name_list = [model_entry["name"] for model_entry in response.json().get("models", [])]
+        except Exception as exception:
+            raise HTTPException(status_code = 502, detail = f"OLLAMA MODEL LIST FAILED : {exception}")
+        return {"default_model" : os.getenv("MODEL_NAME", "qwen3-vl:4b"), "models" : model_name_list}
 
     @asynccontextmanager
     async def _lifespan_async(self, application : FastAPI) -> AsyncIterator[None]:
@@ -169,7 +193,8 @@ class MonitorApplication:
         checkpoint_saver = AsyncPostgresSaver(self.checkpoint_connection_pool)
         await checkpoint_saver.setup()
 
-        self.compiled_graph = _create_compiled_graph(checkpoint_saver)
+        self.checkpoint_saver = checkpoint_saver
+        self._get_or_create_compiled_graph(None)   # 기본 모델 그래프 선생성
         try:
             yield
         finally:
@@ -179,7 +204,7 @@ class MonitorApplication:
         # ① 순수 체크포인트 로드 시간 : aget_state 전후를 perf_counter 로 측정한다
         runnable_configuration = {"configurable" : {"thread_id" : thread_id}}
         load_started_at        = time.perf_counter()
-        state_snapshot         = await self.compiled_graph.aget_state(runnable_configuration)
+        state_snapshot         = await self._get_or_create_compiled_graph(None).aget_state(runnable_configuration)
         load_time_ms           = (time.perf_counter() - load_started_at) * 1000
 
         message_list : List[BaseMessage] = state_snapshot.values.get("messages", []) if state_snapshot else []
@@ -197,11 +222,13 @@ class MonitorApplication:
     async def stream_async(self, stream_request : StreamRequest) -> StreamingResponse:
         runnable_configuration = {"configurable" : {"thread_id" : stream_request.thread_id}}
         input_dictionary       = {"messages" : [HumanMessage(content = stream_request.message)]}
+        compiled_graph         = self._get_or_create_compiled_graph(stream_request.model)
 
         async def generate_token_stream_async() -> AsyncIterator[str]:
             request_started_at   = time.perf_counter()
             is_first_token_seen  = False
-            async for message_chunk, _metadata in self.compiled_graph.astream(input_dictionary, runnable_configuration, stream_mode = "messages"):
+            print(f"STREAM START : THREAD {stream_request.thread_id} - MODEL {stream_request.model or os.getenv('MODEL_NAME', 'qwen3-vl:4b')}", flush = True)
+            async for message_chunk, _metadata in compiled_graph.astream(input_dictionary, runnable_configuration, stream_mode = "messages"):
                 token_text = message_chunk.content if isinstance(message_chunk.content, str) else ""
                 if not token_text:
                     continue
