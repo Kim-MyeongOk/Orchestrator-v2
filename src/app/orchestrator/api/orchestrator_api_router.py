@@ -47,10 +47,23 @@ class OrchestratorAPIRouter:
         self.api_router            = APIRouter(prefix = "/api/v1/orchestrator", tags = ["orchestrator"])
         self.api_router.add_api_route("/stream", self.stream_orchestrator_async, methods = ["POST"])
 
+    async def _get_checkpoint_count_async(self, thread_id : uuid.UUID) -> int:
+        # 개발용 관측 : 해당 스레드의 체크포인트 행 수를 직접 조회한다 (checkpoints.thread_id 는 TEXT 컬럼)
+        async with self.chunk_flush_service.postgresql_pool_manager.get_pool().acquire() as connection:
+            return int(await connection.fetchval("SELECT count(*) FROM checkpoints WHERE thread_id = $1", str(thread_id)))
+
     async def _create_sse_stream_async(self, thread_id : uuid.UUID, run_id : uuid.UUID, user_id : uuid.UUID, input_message_list : List[Any], initial_input_dictionary : Dict[str, Any], started_at : datetime) -> AsyncIterator[str]:
-        event_sequence_number = 0
-        is_stream_finished    = False
+        event_sequence_number   = 0
+        is_stream_finished      = False
+        checkpoint_count_before = 0
         try:
+            # [개발용 print] 요청 시작 시점 : 체크포인트에서 복원된 메시지 수 + 현재 체크포인트 행 수
+            # 1회차 호출 → "0 MESSAGES RESTORED - 0 CHECKPOINTS", 2회차 호출 → 복원 수/누적 수가 증가해 있어야 한다
+            if self.is_checkpoint_enabled:
+                restored_message_count  = len((await self.compiled_graph.aget_state({"configurable" : {"thread_id" : str(thread_id)}})).values.get("messages", []))
+                checkpoint_count_before = await self._get_checkpoint_count_async(thread_id)
+                print(f"CHECKPOINT RESTORED : THREAD {thread_id} - {restored_message_count} MESSAGES RESTORED - {checkpoint_count_before} CHECKPOINTS", flush = True)
+
             yield SseHelper.format_event(event_name = "start", data_dictionary = {"run_id" : str(run_id), "thread_id" : str(thread_id)})
 
             # 각 청크는 executor 내부에서 Redis 에 실시간 누적(Append)되는 동시에 SSE 로 yield 된다
@@ -62,6 +75,12 @@ class OrchestratorAPIRouter:
             # 스트리밍이 예외 없이 정상 종료된 순간, 동일 요청 컨텍스트에서 즉시 flush 한다.
             # asyncio.shield : flush 도중 클라이언트가 끊겨도 저장 처리만은 끝까지 실행한다.
             await asyncio.shield(self.chunk_flush_service.flush_buffer_to_postgres_async(thread_id, run_id, user_id, initial_input_dictionary, started_at))
+
+            # [개발용 print] 스트림 완료 시점 : 이번 실행으로 체크포인트가 몇 개 누적됐는지 (개수 증가 여부)
+            if self.is_checkpoint_enabled:
+                checkpoint_count_after = await self._get_checkpoint_count_async(thread_id)
+                print(f"CHECKPOINT ACCUMULATED : THREAD {thread_id} - {checkpoint_count_before} -> {checkpoint_count_after} CHECKPOINTS (+{checkpoint_count_after - checkpoint_count_before})", flush = True)
+
             yield SseHelper.format_event(event_name = "done", data_dictionary = {"run_id" : str(run_id), "status" : "completed"})
         except Exception as exception:
             # 런타임 에러 : 클라이언트에 에러 이벤트를 전송하고 스트림을 닫는다
