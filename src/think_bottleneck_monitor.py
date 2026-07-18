@@ -88,6 +88,9 @@ def prepare_model_input(message_list : List[BaseMessage], window_message_count :
         updated_fields : Dict[str, Any] = {}
         if isinstance(message.content, str) and "<think>" in message.content:
             updated_fields["content"] = THINK_TAG_PATTERN.sub("", message.content).strip()
+        if isinstance(message.content, list) and any(isinstance(content_block, dict) and content_block.get("type") == "thinking" for content_block in message.content):
+            # google(Gemini) : content 리스트 안의 thinking 블록 제거
+            updated_fields["content"] = [content_block for content_block in message.content if not (isinstance(content_block, dict) and content_block.get("type") == "thinking")]
         if (message.additional_kwargs or {}).get("reasoning_content"):
             updated_fields["additional_kwargs"] = {key : value for key, value in message.additional_kwargs.items() if key != "reasoning_content"}
         slim_message_list.append(message.model_copy(update = updated_fields) if updated_fields else message)
@@ -112,14 +115,18 @@ class ThinkTrimmingMiddleware(AgentMiddleware):
 # deepagents 체크포인트의 pending writes 를 적용하지 못해 messages 가 0 으로 보인다)
 ##################################################
 
-def _create_compiled_graph(checkpoint_saver, model_name : Optional[str] = None):
-    # model_name : 요청별 모델 선택 (None 이면 .env 기본 모델)
+def _create_compiled_graph(checkpoint_saver, model_name : Optional[str] = None, reasoning_effort : Optional[str] = None):
+    # model_name       : 요청별 모델 선택 (None 이면 .env 기본 모델)
+    # reasoning_effort : 생각 강도 low|medium|high (google → thinking_budget, ollama → think 레벨)
+    model_provider = os.getenv("MODEL_PROVIDER", "ollama").strip().lower()
     model_configuration = ModelConfiguration(
-        provider            = os.getenv("MODEL_PROVIDER", "ollama"),
+        provider            = model_provider,
         model_name          = model_name or os.getenv("MODEL_NAME", "qwen3-vl:4b"),
-        base_url            = os.getenv("MODEL_BASE_URL", "http://localhost:11434"),
-        reasoning_enabled   = True,   # True : thinking 을 additional_kwargs.reasoning_content 로 분리 수신 → 실시간 UI 표시 가능
+        api_key             = os.getenv("MODEL_API_KEY") or None,
+        base_url            = os.getenv("MODEL_BASE_URL") or None,
+        reasoning_enabled   = True,   # True : thinking 을 분리 수신(ollama: reasoning_content / google: include_thoughts) → 실시간 UI 표시 가능
                                       # (다음 턴 프롬프트에서는 ThinkTrimmingMiddleware 가 제거하므로 컨텍스트를 오염시키지 않는다)
+        reasoning_effort    = reasoning_effort,
         context_token_count = int(os.getenv("MODEL_CONTEXT_TOKEN_COUNT", "8192")),   # Ollama 기본 4096 은 deepagents 프롬프트+히스토리에 부족 → 절단 → thinking 폭주
         maximum_token_count = int(os.getenv("MODEL_MAXIMUM_TOKEN_COUNT", "4096") or "4096")   # 폭주 시 생성 상한 (thinking 포함)
     )
@@ -138,6 +145,7 @@ class StreamRequest(BaseModel):
     thread_id         : str
     message           : str
     model             : Optional[str] = None    # 요청별 모델 선택 (미지정 시 .env 기본 모델)
+    reasoning_effort  : Optional[str] = None    # 생각 강도 : low | medium | high | None(모델 기본)
     include_reasoning : bool          = False   # True : NDJSON 이벤트 스트림({"type":"reasoning"|"token","text":...}) 으로 생각 과정을 함께 전송
                                                 # False : 답변 토큰만 평문 스트림 (기존 클라이언트 하위호환)
 
@@ -154,15 +162,19 @@ class MonitorApplication:
         self.application.add_api_route("/models",   self.list_models_async,     methods = ["GET"])
         self.application.add_api_route("/stream",   self.stream_async,          methods = ["POST"])
 
-    def _get_or_create_compiled_graph(self, model_name : Optional[str]):
-        # 모델별 그래프를 지연 생성해 캐싱한다 (같은 체크포인터를 공유하므로 스레드 이력은 모델과 무관하게 이어진다)
-        cache_key = model_name or os.getenv("MODEL_NAME", "qwen3-vl:4b")
+    def _get_or_create_compiled_graph(self, model_name : Optional[str], reasoning_effort : Optional[str] = None):
+        # (모델, 생각 강도)별 그래프를 지연 생성해 캐싱한다 (같은 체크포인터를 공유하므로 스레드 이력은 설정과 무관하게 이어진다)
+        cache_key = (model_name or os.getenv("MODEL_NAME", "qwen3-vl:4b"), reasoning_effort)
         if cache_key not in self.compiled_graph_dictionary:
-            self.compiled_graph_dictionary[cache_key] = _create_compiled_graph(self.checkpoint_saver, cache_key)
+            self.compiled_graph_dictionary[cache_key] = _create_compiled_graph(self.checkpoint_saver, cache_key[0], cache_key[1])
         return self.compiled_graph_dictionary[cache_key]
 
     async def list_models_async(self) -> Dict[str, Any]:
-        # Ollama 에 설치된 모델 목록을 프록시한다 (프론트 모델 선택 드롭다운용)
+        # 프론트 모델 선택 드롭다운용 : ollama 는 설치 모델을 프록시, 그 외 프로바이더는 기본 모델만 노출한다
+        default_model  = os.getenv("MODEL_NAME", "qwen3-vl:4b")
+        model_provider = os.getenv("MODEL_PROVIDER", "ollama").strip().lower()
+        if model_provider != "ollama":
+            return {"default_model" : default_model, "models" : [default_model], "provider" : model_provider}
         import httpx
         ollama_base_url = os.getenv("MODEL_BASE_URL", "http://localhost:11434")
         try:
@@ -172,7 +184,7 @@ class MonitorApplication:
                 model_name_list = [model_entry["name"] for model_entry in response.json().get("models", [])]
         except Exception as exception:
             raise HTTPException(status_code = 502, detail = f"OLLAMA MODEL LIST FAILED : {exception}")
-        return {"default_model" : os.getenv("MODEL_NAME", "qwen3-vl:4b"), "models" : model_name_list}
+        return {"default_model" : default_model, "models" : model_name_list, "provider" : model_provider}
 
     @asynccontextmanager
     async def _lifespan_async(self, application : FastAPI) -> AsyncIterator[None]:
@@ -207,7 +219,7 @@ class MonitorApplication:
         # ① 순수 체크포인트 로드 시간 : aget_state 전후를 perf_counter 로 측정한다
         runnable_configuration = {"configurable" : {"thread_id" : thread_id}}
         load_started_at        = time.perf_counter()
-        state_snapshot         = await self._get_or_create_compiled_graph(None).aget_state(runnable_configuration)
+        state_snapshot         = await self._get_or_create_compiled_graph(None, None).aget_state(runnable_configuration)
         load_time_ms           = (time.perf_counter() - load_started_at) * 1000
 
         message_list : List[BaseMessage] = state_snapshot.values.get("messages", []) if state_snapshot else []
@@ -225,18 +237,35 @@ class MonitorApplication:
     async def stream_async(self, stream_request : StreamRequest) -> StreamingResponse:
         runnable_configuration = {"configurable" : {"thread_id" : stream_request.thread_id}}
         input_dictionary       = {"messages" : [HumanMessage(content = stream_request.message)]}
-        compiled_graph         = self._get_or_create_compiled_graph(stream_request.model)
+        compiled_graph         = self._get_or_create_compiled_graph(stream_request.model, stream_request.reasoning_effort)
+
+        def extract_chunk_texts(message_chunk):
+            # 프로바이더별 청크 형식 통합 : ollama 는 additional_kwargs.reasoning_content,
+            # google(Gemini) 은 content 리스트의 {"type":"thinking"} 블록으로 생각이 온다
+            reasoning_text = (message_chunk.additional_kwargs or {}).get("reasoning_content", "")
+            token_text     = ""
+            if isinstance(message_chunk.content, str):
+                token_text = message_chunk.content
+            elif isinstance(message_chunk.content, list):
+                for content_block in message_chunk.content:
+                    if isinstance(content_block, str):
+                        token_text += content_block
+                    elif isinstance(content_block, dict):
+                        if content_block.get("type") == "thinking":
+                            reasoning_text += content_block.get("thinking", "")
+                        elif content_block.get("type") == "text":
+                            token_text += content_block.get("text", "")
+            return reasoning_text, token_text
 
         async def generate_token_stream_async() -> AsyncIterator[str]:
             request_started_at   = time.perf_counter()
             is_first_token_seen  = False
-            print(f"STREAM START : THREAD {stream_request.thread_id} - MODEL {stream_request.model or os.getenv('MODEL_NAME', 'qwen3-vl:4b')}", flush = True)
+            print(f"STREAM START : THREAD {stream_request.thread_id} - MODEL {stream_request.model or os.getenv('MODEL_NAME', 'qwen3-vl:4b')} - EFFORT {stream_request.reasoning_effort or 'default'}", flush = True)
             async for message_chunk, _metadata in compiled_graph.astream(input_dictionary, runnable_configuration, stream_mode = "messages"):
                 # 생각 과정(reasoning) : 사용자가 대기 시간 동안 진행 상황을 볼 수 있게 실시간 전송한다 (NDJSON 모드 한정)
-                reasoning_text = (message_chunk.additional_kwargs or {}).get("reasoning_content", "")
+                reasoning_text, token_text = extract_chunk_texts(message_chunk)
                 if reasoning_text and stream_request.include_reasoning:
                     yield json.dumps({"type" : "reasoning", "text" : reasoning_text}, ensure_ascii = False) + "\n"
-                token_text = message_chunk.content if isinstance(message_chunk.content, str) else ""
                 if not token_text:
                     continue
                 if not is_first_token_seen:

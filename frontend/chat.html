@@ -54,6 +54,16 @@
                 </select>
             </div>
             <div>
+                <label class="block text-[11px] font-medium text-slate-400 mb-1.5">생각 정도</label>
+                <select id="reasoning-effort-select" onchange="onReasoningEffortChanged()"
+                        class="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+                    <option value="">모델 기본</option>
+                    <option value="low">낮음 (빠른 응답)</option>
+                    <option value="medium">보통</option>
+                    <option value="high">높음 (깊은 사고)</option>
+                </select>
+            </div>
+            <div>
                 <label class="block text-[11px] font-medium text-slate-400 mb-1.5">백엔드 API URL</label>
                 <input id="api-url" type="text" value="http://localhost:8002"
                        class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
@@ -214,6 +224,7 @@ function renderActiveRoom() {
     document.getElementById("header-room-title").textContent = room.title;
     document.getElementById("header-model").textContent      = room.model || "기본 모델";
     document.getElementById("model-select").value            = room.model;
+    document.getElementById("reasoning-effort-select").value = room.reasoningEffort || "";
     setStatus("대기", "bg-slate-600");
 
     messageFeed.innerHTML = "";
@@ -226,7 +237,7 @@ function renderActiveRoom() {
     for (const storedMessage of room.messages) {
         if (storedMessage.role === "user")       appendUserBubble(storedMessage.text, false);
         else if (storedMessage.role === "error") appendAgentBubble().markError(storedMessage.text);
-        else                                     { const bubble = appendAgentBubble(); bubble.setStoredReasoning(storedMessage.reasoning); bubble.appendText(storedMessage.text); bubble.finalize(); }
+        else                                     { const bubble = appendAgentBubble(); bubble.setStoredReasoning(storedMessage.reasoning); bubble.appendText(storedMessage.text); bubble.finalize(); bubble.setStoredMeta(storedMessage.meta); }
     }
     scrollFeedToBottom();
 }
@@ -237,6 +248,13 @@ function onModelChanged() {
     document.getElementById("header-model").textContent = room.model || "기본 모델";
     saveRooms();
     renderRoomList();
+}
+
+function onReasoningEffortChanged() {
+    // 생각 강도 : google → thinking_budget(low 1024/medium 8192/high 24576), ollama → think 레벨(지원 모델 한정)
+    const room = getActiveRoom();
+    room.reasoningEffort = document.getElementById("reasoning-effort-select").value;
+    saveRooms();
 }
 
 async function loadModelOptions(retryCount = 5) {
@@ -255,6 +273,13 @@ async function loadModelOptions(retryCount = 5) {
             option.textContent = modelName;
             modelSelect.appendChild(option);
         }
+        // 백엔드 프로바이더가 바뀌면 방에 저장된 이전 모델이 무효가 된다 → 기본 모델로 자동 초기화
+        const validModelSet   = new Set(result.models);
+        let   isRoomListDirty = false;
+        for (const room of roomList) {
+            if (room.model && !validModelSet.has(room.model)) { room.model = ""; isRoomListDirty = true; }
+        }
+        if (isRoomListDirty) { saveRooms(); renderRoomList(); document.getElementById("header-model").textContent = getActiveRoom()?.model || "기본 모델"; }
         modelSelect.value = getActiveRoom()?.model || "";
     } catch (error) {
         if (retryCount > 0) { setTimeout(() => loadModelOptions(retryCount - 1), 3000); return; }
@@ -294,7 +319,7 @@ function appendAgentBubble() {
     const row = document.createElement("div");
     row.className = "flex justify-start bubble-enter";
     // 주의 : 답변 영역은 whitespace-pre-wrap 이므로 태그 사이에 개행/들여쓰기를 넣으면 여백으로 렌더링된다
-    row.innerHTML = `<div class="flex flex-col items-start max-w-[78%] md:max-w-[65%]"><div class="bg-slate-800 border border-slate-700/60 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed shadow w-fit min-w-0"><details class="reasoning-details hidden mb-1.5 -mx-1"><summary class="cursor-pointer select-none text-[11px] text-slate-500 hover:text-slate-300 transition px-1"> reasoning-status <span class="reasoning-status text-slate-600"></span></summary><div class="reasoning-text chat-scroll whitespace-pre-wrap text-[11px] leading-relaxed text-slate-500 bg-slate-950/50 border border-slate-800 rounded-lg px-2.5 py-2 mt-1 max-h-36 overflow-y-auto"></div></details><span class="typing-indicator inline-flex gap-1 items-center py-1"><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span></span><span class="agent-text whitespace-pre-wrap"></span></div><div class="meta-line hidden text-[10px] text-slate-600 mt-1 px-1 font-mono"></div></div>`;
+    row.innerHTML = `<div class="flex flex-col items-start max-w-[78%] md:max-w-[65%]"><div class="bg-slate-800 border border-slate-700/60 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed shadow w-fit min-w-0"><details class="reasoning-details hidden mb-1.5 -mx-1"><summary class="cursor-pointer select-none text-[11px] text-slate-500 hover:text-slate-300 transition px-1">&#129300; 생각 과정 <span class="reasoning-status text-slate-600"></span></summary><div class="reasoning-text chat-scroll whitespace-pre-wrap text-[11px] leading-relaxed text-slate-500 bg-slate-950/50 border border-slate-800 rounded-lg px-2.5 py-2 mt-1 max-h-36 overflow-y-auto"></div></details><span class="typing-indicator inline-flex gap-1 items-center py-1"><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span></span><span class="agent-text whitespace-pre-wrap"></span></div><div class="meta-line hidden text-[10px] text-slate-600 mt-1 px-1 font-mono"></div></div>`;
     messageFeed.appendChild(row);
     scrollFeedToBottom();
     const reasoningDetails = row.querySelector(".reasoning-details");
@@ -335,8 +360,8 @@ function appendAgentBubble() {
             if (reasoningDetails.classList.contains("hidden")) {
                 reasoningDetails.classList.remove("hidden");
                 reasoningDetails.open = true;
-                row.querySelector(".reasoning-status").textContent = "(생각 중…)";
             }
+            reasoningTokenCount += 1;
             reasoningText.textContent += chunkText;
             reasoningText.scrollTop = reasoningText.scrollHeight;
             scrollFeedToBottom();
@@ -362,11 +387,13 @@ function appendAgentBubble() {
             if (chunkText === "") return;
             const indicator = row.querySelector(".typing-indicator");
             if (indicator) indicator.remove();
+            if (liveTimerId !== null) answerTokenCount += 1;   // 라이브 스트리밍 중일 때만 카운트 (복원 렌더링은 제외)
             agentText.textContent += chunkText;
             scrollFeedToBottom();
         },
         finalize : () => {
-            // 스트림 종료 시 : 후행 개행/공백 제거 + 빈 응답이면 인디케이터 대신 플레이스홀더 표시
+            // 스트림 종료 시 : 타이머 정지·메타 고정 + 후행 공백 제거 + 빈 응답이면 플레이스홀더 표시
+            if (liveTimerId !== null) { clearInterval(liveTimerId); renderMetaLine(); liveTimerId = null; }
             const indicator = row.querySelector(".typing-indicator");
             if (indicator) indicator.remove();
             reasoningDetails.open = false;
@@ -380,6 +407,7 @@ function appendAgentBubble() {
             return agentText.textContent;
         },
         markError : (errorText) => {
+            if (liveTimerId !== null) { clearInterval(liveTimerId); liveTimerId = null; metaLine.classList.add("hidden"); }
             const indicator = row.querySelector(".typing-indicator");
             if (indicator) indicator.remove();
             const agentText = row.querySelector(".agent-text");
@@ -409,14 +437,15 @@ async function sendMessage() {
     sendButton.disabled    = true;
     setStatus("응답 중", "bg-emerald-400 animate-pulse");
 
-    // ② 어시스턴트 말풍선을 미리 생성하고 스트리밍 텍스트를 누적한다
+    // ② 어시스턴트 말풍선을 미리 생성하고 스트리밍 텍스트를 누적한다 (경과 시간·토큰 카운터 즉시 시작)
     const agentBubble = appendAgentBubble();
+    agentBubble.startLiveMeta();
 
     try {
         const response = await fetch(`${apiUrl}/stream`, {
             method  : "POST",
             headers : { "Content-Type" : "application/json" },
-            body    : JSON.stringify({ thread_id : room.threadId, message : message, model : room.model || null, include_reasoning : true })
+            body    : JSON.stringify({ thread_id : room.threadId, message : message, model : room.model || null, reasoning_effort : room.reasoningEffort || null, include_reasoning : true })
         });
         if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
 
@@ -444,7 +473,7 @@ async function sendMessage() {
         dispatchEventLine(lineBuffer);   // 종료 후 잔여 버퍼 처리
 
         const finalText = agentBubble.finalize();
-        room.messages.push({ role : "agent", text : finalText, reasoning : agentBubble.getReasoningText() });
+        room.messages.push({ role : "agent", text : finalText, reasoning : agentBubble.getReasoningText(), meta : agentBubble.getMeta() });
         saveRooms();
         setStatus("대기", "bg-slate-600");
     } catch (error) {
