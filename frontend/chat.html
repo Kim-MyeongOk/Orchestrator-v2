@@ -4,12 +4,31 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Orchestrator Chat</title>
-<!-- 빌드 도구 없이 즉시 동작 : Tailwind CDN -->
-<script src="https://cdn.tailwindcss.com"></script>
+<script>
+/* [FOUC 방지] DOM 렌더링 전에 저장된 테마(없으면 시스템 테마)를 html 태그에 주입한다.
+   이 스크립트는 반드시 스타일시트/본문보다 먼저 실행되어야 흰 화면 깜빡임이 없다. */
+(function () {
+    const storedTheme = localStorage.getItem("orchestrator_chat_theme");
+    const isDark      = storedTheme ? storedTheme === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    if (isDark) document.documentElement.classList.add("dark");
+})();
+</script>
 <style>
-    .chat-scroll::-webkit-scrollbar       { width: 6px; }
-    .chat-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
-    .chat-scroll::-webkit-scrollbar-track { background: transparent; }
+    /* 첫 페인트용 크리티컬 배경 (Tailwind 로드 전에도 올바른 배경색 보장) */
+    html       { background : #f1f5f9; }
+    html.dark  { background : #020617; }
+</style>
+<!-- 빌드 도구 없이 즉시 동작 : Tailwind CDN (다크 모드는 class 제어) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config = { darkMode : "class" };</script>
+<style>
+    /* 테마 전환 시 배경·글자·테두리 색을 부드럽게 전환한다 */
+    body, body * { transition-property : background-color, border-color, color; transition-duration : 0.25s; transition-timing-function : ease; }
+
+    .chat-scroll::-webkit-scrollbar                 { width: 6px; }
+    .chat-scroll::-webkit-scrollbar-thumb           { background: #cbd5e1; border-radius: 3px; }
+    html.dark .chat-scroll::-webkit-scrollbar-thumb { background: #334155; }
+    .chat-scroll::-webkit-scrollbar-track           { background: transparent; }
 
     @keyframes typing-blink { 0%, 100% { opacity: 0.2; } 50% { opacity: 1; } }
     .typing-dot        { animation: typing-blink 1.2s infinite; }
@@ -18,17 +37,20 @@
 
     @keyframes bubble-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
     .bubble-enter { animation: bubble-in 0.18s ease-out; }
+
+    @keyframes toast-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
+    .toast-enter { animation: toast-in 0.2s ease-out; }
 </style>
 </head>
-<body class="bg-slate-950 text-slate-100 h-screen overflow-hidden font-sans antialiased">
+<body class="bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100 h-screen overflow-hidden font-sans antialiased">
 
 <div class="h-full flex flex-col md:flex-row">
 
     <!-- ══════════ 좌측 사이드바 : 채팅방 목록 + 세션 설정 ══════════ -->
-    <aside class="md:w-72 shrink-0 bg-slate-900/80 border-b md:border-b-0 md:border-r border-slate-800 flex flex-col max-h-56 md:max-h-none">
+    <aside class="md:w-72 shrink-0 bg-white/80 dark:bg-slate-900/80 border-b md:border-b-0 md:border-r border-slate-200 dark:border-slate-800 flex flex-col max-h-56 md:max-h-none">
         <div class="p-4 md:p-5 pb-3 space-y-4">
             <div class="flex items-center gap-2.5">
-                <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-sm font-bold shadow-lg shadow-indigo-950">O</div>
+                <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-sm font-bold text-white shadow-lg shadow-indigo-300 dark:shadow-indigo-950">O</div>
                 <div>
                     <h1 class="text-sm font-semibold tracking-tight">Orchestrator Chat</h1>
                     <p class="text-[10px] text-slate-500">LangGraph 체크포인트 대화</p>
@@ -36,7 +58,7 @@
             </div>
 
             <button onclick="createRoom()"
-                    class="w-full py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-semibold transition shadow-lg shadow-indigo-950/40">
+                    class="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition shadow-lg shadow-indigo-200 dark:shadow-indigo-950/40">
                 ＋ 새 채팅방
             </button>
         </div>
@@ -45,18 +67,18 @@
         <nav id="room-list" class="chat-scroll flex-1 overflow-y-auto px-3 space-y-1 min-h-0"></nav>
 
         <!-- 세션 설정 -->
-        <div class="p-4 md:p-5 pt-3 space-y-3 border-t border-slate-800/70">
+        <div class="p-4 md:p-5 pt-3 space-y-3 border-t border-slate-200 dark:border-slate-800/70">
             <div>
-                <label class="block text-[11px] font-medium text-slate-400 mb-1.5">모델</label>
+                <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">모델</label>
                 <select id="model-select" onchange="onModelChanged()"
-                        class="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+                        class="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
                     <option value="">(기본 모델)</option>
                 </select>
             </div>
             <div>
-                <label class="block text-[11px] font-medium text-slate-400 mb-1.5">생각 정도</label>
+                <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">생각 정도</label>
                 <select id="reasoning-effort-select" onchange="onReasoningEffortChanged()"
-                        class="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+                        class="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
                     <option value="">모델 기본</option>
                     <option value="low">낮음 (빠른 응답)</option>
                     <option value="medium">보통</option>
@@ -64,17 +86,17 @@
                 </select>
             </div>
             <div>
-                <label class="block text-[11px] font-medium text-slate-400 mb-1.5">백엔드 API URL</label>
+                <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">백엔드 API URL</label>
                 <input id="api-url" type="text" value="http://localhost:8002"
-                       class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+                       class="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
             </div>
             <div>
-                <label class="block text-[11px] font-medium text-slate-400 mb-1.5">Thread ID <span class="text-slate-600">(현재 방)</span></label>
+                <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">Thread ID <span class="text-slate-400 dark:text-slate-600">(현재 방)</span></label>
                 <input id="thread-id" type="text" readonly
-                       class="w-full bg-slate-950/60 border border-slate-800 rounded-lg px-3 py-2 text-[10px] font-mono text-slate-500 focus:outline-none">
+                       class="w-full bg-slate-100 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-[10px] font-mono text-slate-500 focus:outline-none">
             </div>
             <button onclick="resetSession()"
-                    class="w-full py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-medium text-slate-300 transition">
+                    class="w-full py-2 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-300 transition">
                 현재 세션 초기화
             </button>
         </div>
@@ -84,16 +106,22 @@
     <main class="flex-1 flex flex-col min-h-0">
 
         <!-- 상단 바 -->
-        <header class="shrink-0 h-14 px-4 md:px-6 bg-slate-900/60 border-b border-slate-800 flex items-center justify-between backdrop-blur">
+        <header class="shrink-0 h-14 px-4 md:px-6 bg-white/70 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between backdrop-blur">
             <div class="flex items-center gap-2 min-w-0">
-                <span id="header-room-title" class="text-xs font-medium text-slate-200 truncate max-w-[180px]">—</span>
-                <span class="text-slate-700">·</span>
+                <span id="header-room-title" class="text-xs font-medium text-slate-800 dark:text-slate-200 truncate max-w-[180px]">—</span>
+                <span class="text-slate-300 dark:text-slate-700">·</span>
                 <code id="header-thread-id" class="text-[11px] text-slate-500 font-mono truncate">—</code>
-                <span id="header-model" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 shrink-0">기본 모델</span>
+                <span id="header-model" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400 shrink-0">기본 모델</span>
             </div>
-            <div class="flex items-center gap-2 shrink-0">
-                <span id="status-dot" class="w-2 h-2 rounded-full bg-slate-600"></span>
-                <span id="status-text" class="text-[11px] text-slate-400">대기</span>
+            <div class="flex items-center gap-2.5 shrink-0">
+                <span id="status-dot" class="w-2 h-2 rounded-full bg-slate-400 dark:bg-slate-600"></span>
+                <span id="status-text" class="text-[11px] text-slate-500 dark:text-slate-400">대기</span>
+                <!-- 테마 토글 : 라이트 모드 = 해, 다크 모드 = 달 (아이콘 전환은 CSS dark: 변형으로 처리) -->
+                <button onclick="toggleTheme()" title="테마 전환"
+                        class="w-8 h-8 rounded-lg flex items-center justify-center text-amber-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition">
+                    <svg class="w-4.5 h-4.5 block dark:hidden w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.25a.75.75 0 0 1 .75.75v2.25a.75.75 0 0 1-1.5 0V3a.75.75 0 0 1 .75-.75ZM7.5 12a4.5 4.5 0 1 1 9 0 4.5 4.5 0 0 1-9 0ZM18.894 6.166a.75.75 0 0 0-1.06-1.06l-1.591 1.59a.75.75 0 1 0 1.06 1.061l1.591-1.59ZM21.75 12a.75.75 0 0 1-.75.75h-2.25a.75.75 0 0 1 0-1.5H21a.75.75 0 0 1 .75.75ZM17.834 18.894a.75.75 0 0 0 1.06-1.06l-1.59-1.591a.75.75 0 1 0-1.061 1.06l1.59 1.591ZM12 18a.75.75 0 0 1 .75.75V21a.75.75 0 0 1-1.5 0v-2.25A.75.75 0 0 1 12 18ZM7.758 17.303a.75.75 0 0 0-1.061-1.06l-1.591 1.59a.75.75 0 0 0 1.06 1.061l1.592-1.591ZM6 12a.75.75 0 0 1-.75.75H3a.75.75 0 0 1 0-1.5h2.25A.75.75 0 0 1 6 12ZM6.697 7.757a.75.75 0 0 0 1.06-1.06l-1.59-1.591a.75.75 0 0 0-1.061 1.06l1.59 1.591Z"/></svg>
+                    <svg class="hidden dark:block w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" d="M9.528 1.718a.75.75 0 0 1 .162.819A8.97 8.97 0 0 0 9 6a9 9 0 0 0 9 9 8.97 8.97 0 0 0 3.463-.69.75.75 0 0 1 .981.98 10.503 10.503 0 0 1-9.694 6.46c-5.799 0-10.5-4.7-10.5-10.5 0-4.368 2.667-8.112 6.46-9.694a.75.75 0 0 1 .818.162Z" clip-rule="evenodd"/></svg>
+                </button>
             </div>
         </header>
 
@@ -101,12 +129,12 @@
         <div id="message-feed" class="chat-scroll flex-1 overflow-y-auto px-4 md:px-6 py-5 space-y-4"></div>
 
         <!-- 하단 입력 바 -->
-        <footer class="shrink-0 border-t border-slate-800 bg-slate-900/60 backdrop-blur p-3 md:p-4">
+        <footer class="shrink-0 border-t border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60 backdrop-blur p-3 md:p-4">
             <div class="max-w-3xl mx-auto flex items-end gap-2.5">
                 <textarea id="chat-input" rows="1" placeholder="메시지 입력…  (Enter 전송 · Shift+Enter 줄바꿈)"
-                          class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-sm resize-none max-h-40 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition placeholder:text-slate-600"></textarea>
+                          class="flex-1 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-3 text-sm resize-none max-h-40 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition placeholder:text-slate-400 dark:placeholder:text-slate-600"></textarea>
                 <button id="send-button" onclick="sendMessage()"
-                        class="shrink-0 w-11 h-11 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition shadow-lg shadow-indigo-950/50">
+                        class="shrink-0 w-11 h-11 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition shadow-lg shadow-indigo-200 dark:shadow-indigo-950/50">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5"><path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z"/></svg>
                 </button>
             </div>
@@ -114,12 +142,30 @@
     </main>
 </div>
 
+<!-- 에러 토스트 컨테이너 -->
+<div id="toast-container" class="fixed bottom-5 right-5 z-50 space-y-2 w-80 max-w-[90vw]"></div>
+
 <script>
+/* ══════════════════ 테마 (라이트/다크) ══════════════════ */
+
+const THEME_STORAGE_KEY = "orchestrator_chat_theme";
+
+function toggleTheme() {
+    const isDark = document.documentElement.classList.toggle("dark");
+    localStorage.setItem(THEME_STORAGE_KEY, isDark ? "dark" : "light");
+}
+
+// 시스템 테마 변경 실시간 반영 (사용자가 직접 고르기 전까지만)
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (event) => {
+    if (localStorage.getItem(THEME_STORAGE_KEY)) return;   // 명시적 선택이 있으면 시스템 변경 무시
+    document.documentElement.classList.toggle("dark", event.matches);
+});
+
 /* ══════════════════ 채팅방 상태 (localStorage 영속화) ══════════════════ */
 
 const ROOM_STORAGE_KEY = "orchestrator_chat_rooms_v1";
 
-let roomList      = [];     // [{roomId, threadId, title, model, messages: [{role: "user"|"agent"|"error", text}]}]
+let roomList      = [];     // [{roomId, threadId, title, model, reasoningEffort, messages: [{role, text, reasoning?, meta?}]}]
 let activeRoomId  = null;
 let isStreaming   = false;
 
@@ -195,7 +241,7 @@ function renderRoomList() {
     for (const room of roomList) {
         const isActive = room.roomId === activeRoomId;
         const item = document.createElement("div");
-        item.className = `group flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition text-xs ${isActive ? "bg-slate-800 border border-slate-700 text-slate-100" : "text-slate-400 hover:bg-slate-800/60 border border-transparent"}`;
+        item.className = `group flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition text-xs ${isActive ? "bg-slate-200 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100" : "text-slate-600 dark:text-slate-400 hover:bg-slate-200/70 dark:hover:bg-slate-800/60 border border-transparent"}`;
         item.onclick   = () => switchRoom(room.roomId);
 
         const title = document.createElement("span");
@@ -203,11 +249,11 @@ function renderRoomList() {
         title.textContent = room.title;
 
         const modelTag = document.createElement("span");
-        modelTag.className   = "text-[9px] text-slate-600 shrink-0";
+        modelTag.className   = "text-[9px] text-slate-400 dark:text-slate-600 shrink-0";
         modelTag.textContent = room.model ? room.model.split(":")[0] : "";
 
         const deleteButton = document.createElement("button");
-        deleteButton.className   = "shrink-0 w-5 h-5 rounded flex items-center justify-center text-slate-600 hover:text-red-400 hover:bg-slate-700/60 opacity-0 group-hover:opacity-100 transition";
+        deleteButton.className   = "shrink-0 w-5 h-5 rounded flex items-center justify-center text-slate-400 dark:text-slate-600 hover:text-red-500 dark:hover:text-red-400 hover:bg-slate-300/60 dark:hover:bg-slate-700/60 opacity-0 group-hover:opacity-100 transition";
         deleteButton.textContent = "✕";
         deleteButton.title       = "채팅방 삭제";
         deleteButton.onclick     = (event) => deleteRoom(event, room.roomId);
@@ -225,13 +271,13 @@ function renderActiveRoom() {
     document.getElementById("header-model").textContent      = room.model || "기본 모델";
     document.getElementById("model-select").value            = room.model;
     document.getElementById("reasoning-effort-select").value = room.reasoningEffort || "";
-    setStatus("대기", "bg-slate-600");
+    setStatus("대기", "bg-slate-400 dark:bg-slate-600");
 
     messageFeed.innerHTML = "";
     if (room.messages.length === 0) {
         messageFeed.innerHTML = `<div class="text-center pt-10">
-            <p class="text-slate-600 text-sm">메시지를 보내 오케스트레이터와 대화를 시작하세요.</p>
-            <p class="text-slate-700 text-[11px] mt-1.5">백엔드 : <code class="font-mono">python src/think_bottleneck_monitor.py</code> (포트 8002)</p></div>`;
+            <p class="text-slate-400 dark:text-slate-600 text-sm">메시지를 보내 오케스트레이터와 대화를 시작하세요.</p>
+            <p class="text-slate-400/80 dark:text-slate-700 text-[11px] mt-1.5">백엔드 : <code class="font-mono">python src/think_bottleneck_monitor.py</code> (포트 8002)</p></div>`;
         return;
     }
     for (const storedMessage of room.messages) {
@@ -258,7 +304,7 @@ function onReasoningEffortChanged() {
 }
 
 async function loadModelOptions(retryCount = 5) {
-    // 백엔드 GET /models 로 Ollama 설치 모델을 드롭다운에 채운다.
+    // 백엔드 GET /models 로 모델 목록을 드롭다운에 채운다.
     // 백엔드보다 페이지를 먼저 연 경우를 위해 실패 시 3초 간격으로 재시도한다 (최종 실패 시 기본 모델로 동작)
     const apiUrl = document.getElementById("api-url").value.trim().replace(/\/+$/, "");
     try {
@@ -287,6 +333,16 @@ async function loadModelOptions(retryCount = 5) {
     }
 }
 
+/* ══════════════════ 토스트 알림 ══════════════════ */
+
+function showToast(text, toneClass = "bg-red-600/95") {
+    const toast = document.createElement("div");
+    toast.className   = `toast-enter ${toneClass} text-white text-xs leading-relaxed rounded-lg px-4 py-3 shadow-xl`;
+    toast.textContent = text;
+    document.getElementById("toast-container").appendChild(toast);
+    setTimeout(() => { toast.style.opacity = "0"; setTimeout(() => toast.remove(), 300); }, 6000);
+}
+
 /* ══════════════════ 말풍선 렌더링 ══════════════════ */
 
 function setStatus(text, colorClass) {
@@ -298,7 +354,7 @@ function scrollFeedToBottom() { messageFeed.scrollTop = messageFeed.scrollHeight
 
 function appendSystemNotice(text) {
     const notice = document.createElement("div");
-    notice.className   = "text-center text-[11px] text-slate-600 py-1";
+    notice.className   = "text-center text-[11px] text-slate-400 dark:text-slate-600 py-1";
     notice.textContent = text;
     messageFeed.appendChild(notice);
     scrollFeedToBottom();
@@ -307,7 +363,7 @@ function appendSystemNotice(text) {
 function appendUserBubble(text, animate = true) {
     const row = document.createElement("div");
     row.className = "flex justify-end" + (animate ? " bubble-enter" : "");
-    row.innerHTML = `<div class="max-w-[78%] md:max-w-[65%] bg-slate-700 rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow"></div>`;
+    row.innerHTML = `<div class="max-w-[78%] md:max-w-[65%] bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow"></div>`;
     row.firstElementChild.textContent = text;
     messageFeed.appendChild(row);
     scrollFeedToBottom();
@@ -319,12 +375,13 @@ function appendAgentBubble() {
     const row = document.createElement("div");
     row.className = "flex justify-start bubble-enter";
     // 주의 : 답변 영역은 whitespace-pre-wrap 이므로 태그 사이에 개행/들여쓰기를 넣으면 여백으로 렌더링된다
-    row.innerHTML = `<div class="flex flex-col items-start max-w-[78%] md:max-w-[65%]"><div class="bg-slate-800 border border-slate-700/60 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed shadow w-fit min-w-0"><details class="reasoning-details hidden mb-1.5 -mx-1"><summary class="cursor-pointer select-none text-[11px] text-slate-500 hover:text-slate-300 transition px-1">&#129300; 생각 과정 <span class="reasoning-status text-slate-600"></span></summary><div class="reasoning-text chat-scroll whitespace-pre-wrap text-[11px] leading-relaxed text-slate-500 bg-slate-950/50 border border-slate-800 rounded-lg px-2.5 py-2 mt-1 max-h-36 overflow-y-auto"></div></details><span class="typing-indicator inline-flex gap-1 items-center py-1"><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span></span><span class="agent-text whitespace-pre-wrap"></span></div><div class="meta-line hidden text-[10px] text-slate-600 mt-1 px-1 font-mono"></div></div>`;
+    row.innerHTML = `<div class="flex flex-col items-start max-w-[78%] md:max-w-[65%]"><div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700/60 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed shadow w-fit min-w-0"><details class="reasoning-details hidden mb-1.5 -mx-1"><summary class="cursor-pointer select-none text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition px-1">&#129300; 생각 과정 <span class="reasoning-status text-slate-400 dark:text-slate-600"></span></summary><div class="reasoning-text chat-scroll whitespace-pre-wrap text-[11px] leading-relaxed text-slate-500 bg-slate-100 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg px-2.5 py-2 mt-1 max-h-36 overflow-y-auto"></div></details><span class="typing-indicator inline-flex gap-1 items-center py-1"><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span></span><span class="retry-notice hidden text-[11px] text-amber-600 dark:text-amber-400 italic"></span><span class="agent-text whitespace-pre-wrap"></span></div><div class="meta-line hidden text-[10px] text-slate-500 dark:text-slate-600 mt-1 px-1 font-mono"></div></div>`;
     messageFeed.appendChild(row);
     scrollFeedToBottom();
     const reasoningDetails = row.querySelector(".reasoning-details");
     const reasoningText    = row.querySelector(".reasoning-text");
     const metaLine         = row.querySelector(".meta-line");
+    const retryNotice      = row.querySelector(".retry-notice");
 
     // 라이브 메타 상태 (경과 시간 타이머 + 토큰 카운터)
     let liveStartedAt        = null;
@@ -340,6 +397,7 @@ function appendAgentBubble() {
             row.querySelector(".reasoning-status").textContent = `(생각 중… ${formatElapsedSeconds()}s · ${reasoningTokenCount} 토큰)`;
         }
     };
+    const clearRetryNotice = () => { retryNotice.classList.add("hidden"); retryNotice.textContent = ""; };
 
     return {
         startLiveMeta : () => {
@@ -357,6 +415,7 @@ function appendAgentBubble() {
         },
         appendReasoning : (chunkText) => {
             // 생각 과정 실시간 누적 : 첫 조각에서 섹션을 펼치고, 내부 스크롤을 따라간다 (대기 지루함 해소)
+            clearRetryNotice();
             if (reasoningDetails.classList.contains("hidden")) {
                 reasoningDetails.classList.remove("hidden");
                 reasoningDetails.open = true;
@@ -375,6 +434,7 @@ function appendAgentBubble() {
         },
         getReasoningText : () => reasoningText.textContent,
         appendText : (chunkText) => {
+            clearRetryNotice();
             const agentText = row.querySelector(".agent-text");
             if (agentText.textContent === "") {
                 chunkText = chunkText.replace(/^\s+/, "");  // 선두 개행/공백 제거 (whitespace-pre-wrap 말풍선 부풀림 방지)
@@ -391,9 +451,17 @@ function appendAgentBubble() {
             agentText.textContent += chunkText;
             scrollFeedToBottom();
         },
+        hasReceivedAnyText : () => reasoningText.textContent !== "" || row.querySelector(".agent-text").textContent !== "",
+        markRetrying : (noticeText) => {
+            // 자동 재시도 대기 표시 : 말풍선 안에 앰버색 안내를 띄운다 (다음 시도 데이터 도착 시 자동 제거)
+            retryNotice.classList.remove("hidden");
+            retryNotice.textContent = noticeText;
+            scrollFeedToBottom();
+        },
         finalize : () => {
             // 스트림 종료 시 : 타이머 정지·메타 고정 + 후행 공백 제거 + 빈 응답이면 플레이스홀더 표시
             if (liveTimerId !== null) { clearInterval(liveTimerId); renderMetaLine(); liveTimerId = null; }
+            clearRetryNotice();
             const indicator = row.querySelector(".typing-indicator");
             if (indicator) indicator.remove();
             reasoningDetails.open = false;
@@ -406,22 +474,37 @@ function appendAgentBubble() {
             }
             return agentText.textContent;
         },
-        markError : (errorText) => {
+        markError : (errorText, onManualRetry = null) => {
             if (liveTimerId !== null) { clearInterval(liveTimerId); liveTimerId = null; metaLine.classList.add("hidden"); }
+            clearRetryNotice();
             const indicator = row.querySelector(".typing-indicator");
             if (indicator) indicator.remove();
             const agentText = row.querySelector(".agent-text");
             agentText.textContent = errorText;
-            agentText.classList.add("text-red-400");
+            agentText.classList.add("text-red-500", "dark:text-red-400");
+            if (onManualRetry) {
+                // 최종 실패 : 수동 재시도 버튼 제공 (클릭 시 이 에러 말풍선을 제거하고 같은 메시지로 재전송)
+                const retryButton = document.createElement("button");
+                retryButton.className   = "mt-2 block px-3 py-1.5 rounded-lg text-[11px] font-medium bg-red-100 hover:bg-red-200 text-red-700 dark:bg-red-950/60 dark:hover:bg-red-900/60 dark:text-red-300 border border-red-300 dark:border-red-800 transition";
+                retryButton.textContent = "↻ 다시 시도";
+                retryButton.onclick     = () => { row.remove(); onManualRetry(); };
+                agentText.after(retryButton);
+            }
             scrollFeedToBottom();
         }
     };
 }
 
-/* ══════════════════ 전송 + 스트리밍 수신 ══════════════════ */
+/* ══════════════════ 전송 + 스트리밍 수신 (지수 백오프 자동 재시도) ══════════════════ */
+
+const STREAM_MAX_RETRY_COUNT   = 3;      // 최대 자동 재시도 횟수
+const STREAM_BASE_DELAY_MS     = 1000;   // 지수 백오프 기본 간격 : 1초 → 2초 → 4초
+
+class NonRetryableError extends Error {}  // 4xx 등 재시도가 무의미한 오류
+
+function sleepAsync(delayMs) { return new Promise(resolve => setTimeout(resolve, delayMs)); }
 
 async function sendMessage() {
-    const apiUrl  = document.getElementById("api-url").value.trim().replace(/\/+$/, "");
     const message = chatInput.value.trim();
     const room    = getActiveRoom();
     if (!message || isStreaming || !room) return;
@@ -433,60 +516,91 @@ async function sendMessage() {
     saveRooms();
     chatInput.value        = "";
     chatInput.style.height = "auto";
-    isStreaming            = true;
-    sendButton.disabled    = true;
+
+    await executeStreamTurnAsync(room, message);
+}
+
+async function executeStreamTurnAsync(room, message) {
+    // 스트리밍 1턴 실행 : 5xx/네트워크 오류 시 지수 백오프로 자동 재시도하고,
+    // 최종 실패 시 토스트 + 수동 재시도 버튼을 제공한다.
+    const apiUrl        = document.getElementById("api-url").value.trim().replace(/\/+$/, "");
+    isStreaming         = true;
+    sendButton.disabled = true;
     setStatus("응답 중", "bg-emerald-400 animate-pulse");
 
     // ② 어시스턴트 말풍선을 미리 생성하고 스트리밍 텍스트를 누적한다 (경과 시간·토큰 카운터 즉시 시작)
     const agentBubble = appendAgentBubble();
     agentBubble.startLiveMeta();
 
-    try {
-        const response = await fetch(`${apiUrl}/stream`, {
-            method  : "POST",
-            headers : { "Content-Type" : "application/json" },
-            body    : JSON.stringify({ thread_id : room.threadId, message : message, model : room.model || null, reasoning_effort : room.reasoningEffort || null, include_reasoning : true })
-        });
-        if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+    let attemptCount = 0;
+    while (true) {
+        try {
+            const response = await fetch(`${apiUrl}/stream`, {
+                method  : "POST",
+                headers : { "Content-Type" : "application/json" },
+                body    : JSON.stringify({ thread_id : room.threadId, message : message, model : room.model || null, reasoning_effort : room.reasoningEffort || null, include_reasoning : true })
+            });
+            if (response.status >= 500) throw new Error(`HTTP ${response.status} (서버 오류)`);        // 5xx → 재시도 대상
+            if (!response.ok || !response.body) throw new NonRetryableError(`HTTP ${response.status}`); // 4xx → 즉시 실패
 
-        // NDJSON 이벤트 스트림 파싱 : {"type":"reasoning","text":...} 는 생각 과정 섹션에,
-        // {"type":"token","text":...} 는 답변 본문에 실시간 누적한다
-        const streamReader = response.body.getReader();
-        const textDecoder  = new TextDecoder("utf-8");
-        let   lineBuffer   = "";
-        const dispatchEventLine = (eventLine) => {
-            if (!eventLine.trim()) return;
-            try {
-                const streamEvent = JSON.parse(eventLine);
-                if (streamEvent.type === "reasoning")  agentBubble.appendReasoning(streamEvent.text);
-                else if (streamEvent.type === "token") agentBubble.appendText(streamEvent.text);
-            } catch (_ignored) { agentBubble.appendText(eventLine); }   // NDJSON 이 아닌 서버(구버전) 폴백
-        };
-        while (true) {
-            const { done, value } = await streamReader.read();
-            if (done) break;
-            lineBuffer += textDecoder.decode(value, { stream : true });
-            const completeLines = lineBuffer.split("\n");
-            lineBuffer = completeLines.pop();   // 마지막 조각은 미완성 라인일 수 있으므로 버퍼에 남긴다
-            completeLines.forEach(dispatchEventLine);
+            // NDJSON 이벤트 스트림 파싱 : {"type":"reasoning","text":...} 는 생각 과정 섹션에,
+            // {"type":"token","text":...} 는 답변 본문에 실시간 누적한다
+            const streamReader = response.body.getReader();
+            const textDecoder  = new TextDecoder("utf-8");
+            let   lineBuffer   = "";
+            const dispatchEventLine = (eventLine) => {
+                if (!eventLine.trim()) return;
+                try {
+                    const streamEvent = JSON.parse(eventLine);
+                    if (streamEvent.type === "reasoning")  agentBubble.appendReasoning(streamEvent.text);
+                    else if (streamEvent.type === "token") agentBubble.appendText(streamEvent.text);
+                } catch (_ignored) { agentBubble.appendText(eventLine); }   // NDJSON 이 아닌 서버(구버전) 폴백
+            };
+            while (true) {
+                const { done, value } = await streamReader.read();
+                if (done) break;
+                lineBuffer += textDecoder.decode(value, { stream : true });
+                const completeLines = lineBuffer.split("\n");
+                lineBuffer = completeLines.pop();   // 마지막 조각은 미완성 라인일 수 있으므로 버퍼에 남긴다
+                completeLines.forEach(dispatchEventLine);
+            }
+            dispatchEventLine(lineBuffer);   // 종료 후 잔여 버퍼 처리
+
+            const finalText = agentBubble.finalize();
+            room.messages.push({ role : "agent", text : finalText, reasoning : agentBubble.getReasoningText(), meta : agentBubble.getMeta() });
+            saveRooms();
+            setStatus("대기", "bg-slate-400 dark:bg-slate-600");
+            break;
+        } catch (error) {
+            // 자동 재시도 조건 : 재시도 가능 오류 + 아직 아무 데이터도 못 받음(중복 응답 방지) + 횟수 남음
+            const isRetryable = !(error instanceof NonRetryableError) && !agentBubble.hasReceivedAnyText() && attemptCount < STREAM_MAX_RETRY_COUNT;
+            if (isRetryable) {
+                attemptCount += 1;
+                const backoffDelayMs = STREAM_BASE_DELAY_MS * 2 ** (attemptCount - 1);   // 1초 → 2초 → 4초
+                agentBubble.markRetrying(`연결 실패 — ${backoffDelayMs / 1000}초 후 자동 재시도 (${attemptCount}/${STREAM_MAX_RETRY_COUNT})`);
+                setStatus(`재연결 ${attemptCount}/${STREAM_MAX_RETRY_COUNT}`, "bg-amber-400 animate-pulse");
+                await sleepAsync(backoffDelayMs);
+                continue;
+            }
+            // 최종 실패 : 에러 말풍선 + 토스트 + 수동 재시도 버튼
+            const failReason = agentBubble.hasReceivedAnyText() ? "응답 중 연결이 끊겼습니다" : `응답 실패 : ${error.message}`;
+            const errorText  = `${failReason} — 자동 재시도 ${attemptCount}회 모두 실패했거나 재시도할 수 없는 오류입니다.`;
+            agentBubble.markError(errorText, () => {
+                if (isStreaming) return;
+                room.messages = room.messages.filter(storedMessage => !(storedMessage.role === "error" && storedMessage.text === errorText));
+                saveRooms();
+                executeStreamTurnAsync(room, message);   // 같은 메시지로 재전송
+            });
+            room.messages.push({ role : "error", text : errorText });
+            saveRooms();
+            setStatus("오류", "bg-red-500");
+            showToast(`⚠ ${failReason}\n백엔드(포트 8002) 실행 여부를 확인한 뒤 '다시 시도'를 눌러주세요.`);
+            break;
         }
-        dispatchEventLine(lineBuffer);   // 종료 후 잔여 버퍼 처리
-
-        const finalText = agentBubble.finalize();
-        room.messages.push({ role : "agent", text : finalText, reasoning : agentBubble.getReasoningText(), meta : agentBubble.getMeta() });
-        saveRooms();
-        setStatus("대기", "bg-slate-600");
-    } catch (error) {
-        const errorText = `응답 실패 : ${error.message} — 백엔드가 실행 중인지 확인하세요.`;
-        agentBubble.markError(errorText);
-        room.messages.push({ role : "error", text : errorText });
-        saveRooms();
-        setStatus("오류", "bg-red-500");
-    } finally {
-        isStreaming         = false;
-        sendButton.disabled = false;
-        chatInput.focus();
     }
+    isStreaming         = false;
+    sendButton.disabled = false;
+    chatInput.focus();
 }
 
 /* ══════════════════ 입력 UX ══════════════════ */
