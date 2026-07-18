@@ -41,10 +41,13 @@ class ChatModelFactory:
                 max_retries = model_configuration.maximum_retry_count
             )
         if provider == "ollama":
+            # reasoning=False : qwen3 계열의 thinking 토큰 생성을 서버 측에서 차단한다
+            # (thinking 이 켜져 있으면 짧은 답변에도 수천 토큰을 생성해 턴 지연이 분 단위로 커진다)
             return ChatOllama(
                 model                = model_configuration.model_name,
                 base_url             = model_configuration.base_url or "http://localhost:11434",
                 temperature          = model_configuration.temperature,
+                reasoning            = model_configuration.reasoning_enabled,
                 num_predict          = model_configuration.maximum_token_count,
                 client_kwargs        = {"timeout" : model_configuration.timeout_second_count},
                 sync_client_kwargs   = {"transport" : httpx.HTTPTransport(retries = model_configuration.maximum_retry_count)},
