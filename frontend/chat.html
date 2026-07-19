@@ -46,15 +46,17 @@
 
 <div class="h-full flex flex-col md:flex-row">
 
-    <!-- ══════════ 좌측 사이드바 : 채팅방 목록 + 세션 설정 ══════════ -->
-    <aside class="md:w-72 shrink-0 bg-white/80 dark:bg-slate-900/80 border-b md:border-b-0 md:border-r border-slate-200 dark:border-slate-800 flex flex-col max-h-56 md:max-h-none">
-        <div class="p-4 md:p-5 pb-3 space-y-4">
+    <!-- ══════════ 좌측 사이드바 : 채팅방 목록 + 세션 설정 (드래그 리사이즈 + 접기 지원) ══════════ -->
+    <aside id="sidebar" class="md:w-72 shrink-0 bg-white/80 dark:bg-slate-900/80 border-b md:border-b-0 md:border-r border-slate-200 dark:border-slate-800 flex flex-col max-h-64 md:max-h-none overflow-y-auto md:overflow-hidden">
+        <div class="sidebar-content p-4 md:p-5 pb-3 space-y-4">
             <div class="flex items-center gap-2.5">
                 <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-sm font-bold text-white shadow-lg shadow-indigo-300 dark:shadow-indigo-950">O</div>
-                <div>
+                <div class="flex-1 min-w-0">
                     <h1 class="text-sm font-semibold tracking-tight">Orchestrator Chat</h1>
                     <p class="text-[10px] text-slate-500">LangGraph 체크포인트 대화</p>
                 </div>
+                <button onclick="toggleSidebarCollapsed()" title="사이드바 접기"
+                        class="hidden md:flex w-6 h-6 rounded items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-800 transition text-xs">◀</button>
             </div>
 
             <button onclick="createRoom()"
@@ -64,10 +66,21 @@
         </div>
 
         <!-- 채팅방 목록 -->
-        <nav id="room-list" class="chat-scroll flex-1 overflow-y-auto px-3 space-y-1 min-h-0"></nav>
+        <nav id="room-list" class="sidebar-content chat-scroll flex-1 overflow-y-auto px-3 space-y-1 min-h-0"></nav>
+
+        <!-- 접힌 상태 레일 : 펼치기 버튼만 노출 -->
+        <div class="sidebar-rail hidden flex-col items-center pt-4">
+            <button onclick="toggleSidebarCollapsed()" title="사이드바 펼치기"
+                    class="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-800 transition text-xs">▶</button>
+        </div>
 
         <!-- 세션 설정 -->
-        <div class="p-4 md:p-5 pt-3 space-y-3 border-t border-slate-200 dark:border-slate-800/70">
+        <div class="sidebar-content p-4 md:p-5 pt-3 space-y-3 border-t border-slate-200 dark:border-slate-800/70">
+            <div>
+                <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">사용자 ID <span class="text-slate-400 dark:text-slate-600">(방 목록이 이 ID 로 저장됨)</span></label>
+                <input id="user-id" type="text" onchange="onUserIdChanged()"
+                       class="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+            </div>
             <div>
                 <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">모델</label>
                 <select id="model-select" onchange="onModelChanged()"
@@ -85,15 +98,25 @@
                     <option value="high">높음 (깊은 사고)</option>
                 </select>
             </div>
-            <div>
-                <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">백엔드 API URL</label>
-                <input id="api-url" type="text" value="http://localhost:8002"
-                       class="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+            <!-- 개발자 모드 토글 : 켰을 때만 API URL / Thread ID 노출 -->
+            <div class="flex items-center justify-between">
+                <label class="text-[11px] font-medium text-slate-500 dark:text-slate-400 select-none cursor-pointer" for="developer-mode-toggle">개발자 모드</label>
+                <button id="developer-mode-toggle" onclick="toggleDeveloperMode()" role="switch" aria-checked="false"
+                        class="relative w-9 h-5 rounded-full bg-slate-300 dark:bg-slate-700 transition-colors">
+                    <span class="developer-toggle-knob absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform"></span>
+                </button>
             </div>
-            <div>
-                <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">Thread ID <span class="text-slate-400 dark:text-slate-600">(현재 방)</span></label>
-                <input id="thread-id" type="text" readonly
-                       class="w-full bg-slate-100 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-[10px] font-mono text-slate-500 focus:outline-none">
+            <div id="developer-panel" class="hidden space-y-3">
+                <div>
+                    <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">백엔드 API URL</label>
+                    <input id="api-url" type="text" value="http://localhost:8002"
+                           class="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+                </div>
+                <div>
+                    <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">Thread ID <span class="text-slate-400 dark:text-slate-600">(현재 방)</span></label>
+                    <input id="thread-id" type="text" readonly
+                           class="w-full bg-slate-100 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-[10px] font-mono text-slate-500 focus:outline-none">
+                </div>
             </div>
             <button onclick="resetSession()"
                     class="w-full py-2 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-300 transition">
@@ -102,8 +125,11 @@
         </div>
     </aside>
 
+    <!-- 사이드바 리사이즈 핸들 (데스크톱 전용, 드래그로 폭 조절) -->
+    <div id="sidebar-resize-handle" class="hidden md:block w-1.5 shrink-0 cursor-col-resize bg-slate-200 dark:bg-slate-800 hover:bg-indigo-400 dark:hover:bg-indigo-500 transition-colors"></div>
+
     <!-- ══════════ 우측 메인 : 채팅 영역 ══════════ -->
-    <main class="flex-1 flex flex-col min-h-0">
+    <main class="flex-1 flex flex-col min-h-0 min-w-0">
 
         <!-- 상단 바 -->
         <header class="shrink-0 h-14 px-4 md:px-6 bg-white/70 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between backdrop-blur">
@@ -128,6 +154,28 @@
         <!-- 중앙 대화창 -->
         <div id="message-feed" class="chat-scroll flex-1 overflow-y-auto px-4 md:px-6 py-5 space-y-4"></div>
 
+        <!-- ══ 디버그 패널 (개발자 모드 전용) : 상단 핸들 드래그로 높이 조절, 헤더 버튼으로 접기 ══ -->
+        <div id="debug-resize-handle" class="hidden h-1.5 shrink-0 cursor-row-resize bg-slate-200 dark:bg-slate-800 hover:bg-indigo-400 dark:hover:bg-indigo-500 transition-colors"></div>
+        <section id="debug-panel" class="hidden shrink-0 flex flex-col bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 min-h-0" style="height : 230px">
+            <div class="shrink-0 flex items-center justify-between px-3 py-1 border-b border-slate-200 dark:border-slate-800">
+                <div class="flex gap-1">
+                    <button onclick="switchDebugTab('redis')" data-debug-tab="redis"
+                            class="debug-tab-button px-2.5 py-1 rounded text-[11px] font-mono font-medium transition">REDIS</button>
+                    <button onclick="switchDebugTab('info')" data-debug-tab="info"
+                            class="debug-tab-button px-2.5 py-1 rounded text-[11px] font-medium transition">채팅방 정보</button>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span id="debug-refresh-status" class="text-[10px] text-slate-400 dark:text-slate-600 font-mono"></span>
+                    <button id="info-csv-button" onclick="downloadRoomInfoCsv()"
+                            class="hidden px-2 py-1 rounded text-[10px] font-medium bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition">CSV 저장</button>
+                    <button onclick="toggleDebugPanelCollapsed()" id="debug-collapse-button" title="패널 접기"
+                            class="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition text-[10px]">▼</button>
+                </div>
+            </div>
+            <div id="debug-tab-redis" class="debug-tab-content chat-scroll flex-1 overflow-auto px-3 py-2 font-mono text-[11px] leading-relaxed"></div>
+            <div id="debug-tab-info"  class="debug-tab-content chat-scroll hidden flex-1 overflow-auto px-3 py-2"></div>
+        </section>
+
         <!-- 하단 입력 바 -->
         <footer class="shrink-0 border-t border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60 backdrop-blur p-3 md:p-4">
             <div class="max-w-3xl mx-auto flex items-end gap-2.5">
@@ -144,6 +192,20 @@
 
 <!-- 에러 토스트 컨테이너 -->
 <div id="toast-container" class="fixed bottom-5 right-5 z-50 space-y-2 w-80 max-w-[90vw]"></div>
+
+<!-- 세션 초기화 확인 모달 : 실수로 대화가 날아가는 것을 방지한다 -->
+<div id="confirm-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40 dark:bg-black/60 backdrop-blur-sm" onclick="if (event.target === this) closeResetConfirmModal()">
+    <div class="w-80 mx-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl p-5 bubble-enter">
+        <h2 class="text-sm font-semibold text-slate-800 dark:text-slate-100">현재 세션을 초기화할까요?</h2>
+        <p class="mt-2 text-xs leading-relaxed text-slate-500 dark:text-slate-400">이 방의 대화 내용이 모두 지워지고 새 Thread 가 발급됩니다. 이전 체크포인트 대화는 더 이상 이어지지 않습니다.</p>
+        <div class="mt-4 flex gap-2 justify-end">
+            <button onclick="closeResetConfirmModal()"
+                    class="px-3.5 py-2 rounded-lg text-xs font-medium bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition">취소</button>
+            <button onclick="confirmResetSession()"
+                    class="px-3.5 py-2 rounded-lg text-xs font-semibold bg-red-600 hover:bg-red-500 text-white transition">초기화</button>
+        </div>
+    </div>
+</div>
 
 <script>
 /* ══════════════════ 테마 (라이트/다크) ══════════════════ */
@@ -173,30 +235,83 @@ const messageFeed = document.getElementById("message-feed");
 const chatInput   = document.getElementById("chat-input");
 const sendButton  = document.getElementById("send-button");
 
-function saveRooms() {
-    localStorage.setItem(ROOM_STORAGE_KEY, JSON.stringify({ roomList, activeRoomId }));
+function getApiUrl() { return document.getElementById("api-url").value.trim().replace(/\/+$/, ""); }
+
+/* ── 사용자 ID : 방 목록이 서버에 이 ID 기준으로 저장된다 ── */
+
+const USER_ID_STORAGE_KEY = "orchestrator_chat_user_id";
+
+function getUserId() { return document.getElementById("user-id").value.trim() || "anonymous"; }
+
+function initializeUserId() {
+    const storedUserId = localStorage.getItem(USER_ID_STORAGE_KEY) || `user-${crypto.randomUUID().slice(0, 8)}`;
+    localStorage.setItem(USER_ID_STORAGE_KEY, storedUserId);
+    document.getElementById("user-id").value = storedUserId;
 }
 
-function loadRooms() {
+async function onUserIdChanged() {
+    // 사용자 ID 변경 : 해당 유저의 방 목록을 서버에서 다시 불러온다
+    if (isStreaming) return;
+    localStorage.setItem(USER_ID_STORAGE_KEY, getUserId());
+    await loadRoomsAsync();
+    renderRoomList();
+    renderActiveRoom();
+}
+
+/* ── 방 목록 : 서버(chat_room 테이블)가 원본, localStorage 는 오프라인 폴백 캐시 ── */
+
+function saveRooms() {
+    localStorage.setItem(ROOM_STORAGE_KEY, JSON.stringify({ roomList, activeRoomId, userId : getUserId() }));
+}
+
+async function syncRoomToServerAsync(room) {
+    // 방 메타(제목/모델/생각 정도/Thread) 를 서버에 upsert 한다 — 실패해도 로컬 동작은 계속 (다음 변경 때 재시도)
     try {
-        const stored = JSON.parse(localStorage.getItem(ROOM_STORAGE_KEY));
-        if (stored && Array.isArray(stored.roomList) && stored.roomList.length > 0) {
-            roomList     = stored.roomList;
-            activeRoomId = stored.roomList.some(room => room.roomId === stored.activeRoomId) ? stored.activeRoomId : stored.roomList[0].roomId;
-            return;
-        }
+        await fetch(`${getApiUrl()}/rooms`, {
+            method  : "POST",
+            headers : { "Content-Type" : "application/json" },
+            body    : JSON.stringify({ user_id : getUserId(), room_id : room.roomId, thread_id : room.threadId, title : room.title, model : room.model || null, reasoning_effort : room.reasoningEffort || null })
+        });
     } catch (_ignored) {}
-    roomList = [];
-    createRoom();   // 저장된 방이 없으면 첫 방 자동 생성
+}
+
+async function loadRoomsAsync() {
+    // 서버에서 유저별 방 목록을 불러온다. 실패 시 localStorage 캐시(같은 유저일 때만)로 폴백.
+    let cachedState = null;
+    try { cachedState = JSON.parse(localStorage.getItem(ROOM_STORAGE_KEY)); } catch (_ignored) {}
+    try {
+        const response = await fetch(`${getApiUrl()}/rooms?user_id=${encodeURIComponent(getUserId())}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const serverRoomList = (await response.json()).rooms;
+        if (serverRoomList.length === 0 && Array.isArray(cachedState?.roomList) && cachedState.roomList.length > 0 && (cachedState.userId === undefined || cachedState.userId === getUserId())) {
+            // 최초 1회 마이그레이션 : 서버 도입 이전의 로컬 방 목록을 이 사용자 ID 로 서버에 등록한다
+            roomList = cachedState.roomList;
+            for (const localRoom of roomList) syncRoomToServerAsync(localRoom);
+        } else {
+            roomList = serverRoomList.map(serverRoom => {
+                // 로컬 캐시에 같은 방이 있으면 메시지/메타 캐시를 승계한다 (없으면 lazy 로드 대상 = null)
+                const cachedRoom = (cachedState?.userId === undefined || cachedState?.userId === getUserId()) ? cachedState?.roomList?.find(room => room.roomId === serverRoom.room_id) : null;
+                return { roomId : serverRoom.room_id, threadId : serverRoom.thread_id, title : serverRoom.title, model : serverRoom.model || "", reasoningEffort : serverRoom.reasoning_effort || "", messages : cachedRoom?.messages ?? null };
+            });
+        }
+    } catch (error) {
+        // 서버 불가 : 같은 유저의 로컬 캐시로 폴백 (없으면 빈 목록)
+        roomList = (cachedState?.userId === getUserId() && Array.isArray(cachedState.roomList)) ? cachedState.roomList : [];
+        showToast(`⚠ 방 목록 서버 연결 실패 (${error.message})\n로컬 캐시로 동작합니다.`);
+    }
+    if (roomList.length === 0) { createRoom(); return; }
+    activeRoomId = roomList.some(room => room.roomId === cachedState?.activeRoomId) ? cachedState.activeRoomId : roomList[0].roomId;
+    saveRooms();
 }
 
 function getActiveRoom() { return roomList.find(room => room.roomId === activeRoomId); }
 
 function createRoom() {
-    const room = { roomId : crypto.randomUUID(), threadId : crypto.randomUUID(), title : "새 대화", model : "", messages : [] };
+    const room = { roomId : crypto.randomUUID(), threadId : crypto.randomUUID(), title : "새 대화", model : "", reasoningEffort : "", messages : [] };
     roomList.unshift(room);
     activeRoomId = room.roomId;
     saveRooms();
+    syncRoomToServerAsync(room);
     renderRoomList();
     renderActiveRoom();
 }
@@ -207,12 +322,14 @@ function switchRoom(roomId) {
     saveRooms();
     renderRoomList();
     renderActiveRoom();
+    refreshDebugTabs();   // 디버그 패널이 열려 있으면 새 방 기준으로 즉시 갱신
 }
 
 function deleteRoom(event, roomId) {
     event.stopPropagation();
     if (isStreaming) return;
     roomList = roomList.filter(room => room.roomId !== roomId);
+    fetch(`${getApiUrl()}/rooms/${roomId}?user_id=${encodeURIComponent(getUserId())}`, { method : "DELETE" }).catch(() => {});
     if (roomList.length === 0) { createRoom(); return; }
     if (activeRoomId === roomId) activeRoomId = roomList[0].roomId;
     saveRooms();
@@ -221,16 +338,305 @@ function deleteRoom(event, roomId) {
 }
 
 function resetSession() {
-    // 현재 방의 Thread 를 새로 발급 (체크포인트와 분리된 새 대화) + 메시지 피드 초기화
+    // 초기화 버튼 클릭 : 바로 지우지 않고 확인 모달을 띄운다 (실수 방지)
     if (isStreaming) return;
+    document.getElementById("confirm-modal").classList.remove("hidden");
+}
+
+function closeResetConfirmModal() {
+    document.getElementById("confirm-modal").classList.add("hidden");
+}
+
+function confirmResetSession() {
+    // 모달에서 '초기화' 선택 시에만 실제 초기화 : 새 Thread 발급 (체크포인트와 분리) + 메시지 피드 초기화
+    closeResetConfirmModal();
     const room = getActiveRoom();
     room.threadId = crypto.randomUUID();
     room.messages = [];
     room.title    = "새 대화";
     saveRooms();
+    syncRoomToServerAsync(room);
     renderRoomList();
     renderActiveRoom();
     appendSystemNotice("새 세션이 시작되었습니다. 이전 체크포인트와 분리된 새 Thread 입니다.");
+}
+
+// ESC 로 확인 모달 닫기
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeResetConfirmModal();
+});
+
+/* ══════════════════ 개발자 모드 (API URL / Thread ID 노출 제어) ══════════════════ */
+
+const DEVELOPER_MODE_STORAGE_KEY = "orchestrator_chat_developer_mode";
+
+function applyDeveloperMode(isEnabled) {
+    document.getElementById("developer-panel").classList.toggle("hidden", !isEnabled);
+    const toggleSwitch = document.getElementById("developer-mode-toggle");
+    toggleSwitch.setAttribute("aria-checked", String(isEnabled));
+    toggleSwitch.classList.toggle("bg-indigo-600",      isEnabled);
+    toggleSwitch.classList.toggle("bg-slate-300",       !isEnabled);
+    toggleSwitch.classList.toggle("dark:bg-slate-700",  !isEnabled);   // 다크 변형이 인디고를 덮지 않게 함께 토글
+    toggleSwitch.querySelector(".developer-toggle-knob").style.transform = isEnabled ? "translateX(16px)" : "translateX(0)";
+    updateDebugPanelVisibility(isEnabled);   // 디버그 패널(하단)도 개발자 모드에 연동
+}
+
+function toggleDeveloperMode() {
+    const isEnabled = document.getElementById("developer-panel").classList.contains("hidden");   // 현재 숨김 → 켜기
+    localStorage.setItem(DEVELOPER_MODE_STORAGE_KEY, isEnabled ? "on" : "off");
+    applyDeveloperMode(isEnabled);
+}
+
+function isDeveloperModeEnabled() { return !document.getElementById("developer-panel").classList.contains("hidden"); }
+
+/* ══════════════════ 패널 레이아웃 : 리사이즈 + 접기 (상태 영속화) ══════════════════ */
+
+const PANEL_STATE_STORAGE_KEY = "orchestrator_chat_panel_state_v1";
+const panelState = { sidebarWidth : 288, sidebarCollapsed : false, debugHeight : 230, debugCollapsed : false, debugTab : "redis" };
+
+function loadPanelState() { try { Object.assign(panelState, JSON.parse(localStorage.getItem(PANEL_STATE_STORAGE_KEY)) || {}); } catch (_ignored) {} }
+function savePanelState() { localStorage.setItem(PANEL_STATE_STORAGE_KEY, JSON.stringify(panelState)); }
+
+function applySidebarState() {
+    const sidebar = document.getElementById("sidebar");
+    const rail    = sidebar.querySelector(".sidebar-rail");
+    if (!window.matchMedia("(min-width: 768px)").matches) {
+        // 모바일(세로 배치) : 데스크톱에서 남은 인라인 폭/접힘 상태를 반드시 해제해야 잘림이 없다
+        sidebar.style.width = "";
+        sidebar.querySelectorAll(".sidebar-content").forEach(sectionElement => sectionElement.classList.remove("hidden"));
+        rail.classList.add("hidden");
+        rail.classList.remove("flex");
+        return;
+    }
+    // 데스크톱 : 저장된 폭을 현재 창 크기에 맞게 클램프 (창을 줄였을 때 채팅 영역이 눌리지 않게)
+    const clampedWidth  = Math.min(panelState.sidebarWidth, Math.max(200, Math.floor(window.innerWidth * 0.4)));
+    sidebar.style.width = panelState.sidebarCollapsed ? "48px" : `${clampedWidth}px`;
+    sidebar.querySelectorAll(".sidebar-content").forEach(sectionElement => sectionElement.classList.toggle("hidden", panelState.sidebarCollapsed));
+    rail.classList.toggle("hidden", !panelState.sidebarCollapsed);
+    rail.classList.toggle("flex",   panelState.sidebarCollapsed);
+}
+
+function toggleSidebarCollapsed() {
+    panelState.sidebarCollapsed = !panelState.sidebarCollapsed;
+    savePanelState();
+    applySidebarState();
+}
+
+function applyDebugPanelState() {
+    const debugPanel    = document.getElementById("debug-panel");
+    // 저장된 높이를 현재 창 높이에 맞게 클램프 (좁은/낮은 창에서 채팅 영역이 사라지지 않게)
+    const clampedHeight = Math.min(panelState.debugHeight, Math.max(90, Math.floor(window.innerHeight * 0.6)));
+    debugPanel.style.height = panelState.debugCollapsed ? "34px" : `${clampedHeight}px`;
+    document.getElementById("debug-collapse-button").textContent = panelState.debugCollapsed ? "▲" : "▼";
+    document.querySelectorAll(".debug-tab-content").forEach(tabContent => {
+        const isActiveTab = tabContent.id === `debug-tab-${panelState.debugTab}`;
+        tabContent.classList.toggle("hidden", panelState.debugCollapsed || !isActiveTab);
+    });
+}
+
+function toggleDebugPanelCollapsed() {
+    panelState.debugCollapsed = !panelState.debugCollapsed;
+    savePanelState();
+    applyDebugPanelState();
+    if (!panelState.debugCollapsed) refreshDebugTabs();
+}
+
+// 창 크기 변경 시 패널 상태 재적용 : 좁아지면 모바일 레이아웃으로 복귀하고, 저장된 크기를 다시 클램프한다
+window.addEventListener("resize", () => {
+    applySidebarState();
+    if (isDeveloperModeEnabled()) applyDebugPanelState();
+});
+
+function initializePanelResizeHandles() {
+    // 사이드바 폭 드래그 (핸들 위치 = 좌측 기준 X 좌표)
+    document.getElementById("sidebar-resize-handle").addEventListener("mousedown", (event) => {
+        if (panelState.sidebarCollapsed) return;
+        event.preventDefault();
+        const onMouseMove = (moveEvent) => { panelState.sidebarWidth = Math.min(480, Math.max(200, moveEvent.clientX)); applySidebarState(); };
+        const onMouseUp   = () => { document.removeEventListener("mousemove", onMouseMove); document.removeEventListener("mouseup", onMouseUp); savePanelState(); };
+        document.addEventListener("mousemove", onMouseMove);
+        document.addEventListener("mouseup", onMouseUp);
+    });
+    // 디버그 패널 높이 드래그 (패널 하단 기준으로 계산)
+    document.getElementById("debug-resize-handle").addEventListener("mousedown", (event) => {
+        if (panelState.debugCollapsed) return;
+        event.preventDefault();
+        const debugPanel  = document.getElementById("debug-panel");
+        const onMouseMove = (moveEvent) => {
+            const panelBottom      = debugPanel.getBoundingClientRect().bottom;
+            panelState.debugHeight = Math.min(window.innerHeight * 0.6, Math.max(90, panelBottom - moveEvent.clientY));
+            applyDebugPanelState();
+        };
+        const onMouseUp = () => { document.removeEventListener("mousemove", onMouseMove); document.removeEventListener("mouseup", onMouseUp); savePanelState(); };
+        document.addEventListener("mousemove", onMouseMove);
+        document.addEventListener("mouseup", onMouseUp);
+    });
+}
+
+/* ══════════════════ 디버그 패널 : 탭 전환 ══════════════════ */
+
+function switchDebugTab(tabName) {
+    panelState.debugTab       = tabName;
+    panelState.debugCollapsed = false;   // 탭 클릭 시 접힘 자동 해제
+    savePanelState();
+    document.querySelectorAll(".debug-tab-button").forEach(tabButton => {
+        const isActive = tabButton.dataset.debugTab === tabName;
+        tabButton.className = `debug-tab-button px-2.5 py-1 rounded text-[11px] font-medium transition ${tabButton.dataset.debugTab === "redis" ? "font-mono " : ""}` +
+            (isActive ? "bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-100" : "text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300");
+    });
+    document.getElementById("info-csv-button").classList.toggle("hidden", tabName !== "info");
+    applyDebugPanelState();
+    refreshDebugTabs();
+}
+
+function refreshDebugTabs() {
+    if (!isDeveloperModeEnabled() || panelState.debugCollapsed) return;
+    if (panelState.debugTab === "redis") refreshRedisTabAsync();
+    else                                 renderRoomInfoTab();
+}
+
+function updateDebugPanelVisibility(isEnabled) {
+    document.getElementById("debug-resize-handle").classList.toggle("hidden", !isEnabled);
+    document.getElementById("debug-panel").classList.toggle("hidden", !isEnabled);
+    if (isEnabled) { switchDebugTab(panelState.debugTab); startRedisPolling(); }
+    else           { stopRedisPolling(); }
+}
+
+/* ══════════════════ REDIS 탭 : 트리 구조 JSON 실시간 시각화 (3초 폴링) ══════════════════ */
+
+let redisPollTimerId = null;
+
+function startRedisPolling() { stopRedisPolling(); redisPollTimerId = setInterval(refreshRedisTabAsync, 3000); }
+function stopRedisPolling()  { if (redisPollTimerId !== null) { clearInterval(redisPollTimerId); redisPollTimerId = null; } }
+
+async function refreshRedisTabAsync() {
+    if (!isDeveloperModeEnabled() || panelState.debugCollapsed || panelState.debugTab !== "redis") return;
+    const room = getActiveRoom();
+    if (!room) return;
+    const redisContainer = document.getElementById("debug-tab-redis");
+    try {
+        const response = await fetch(`${getApiUrl()}/redis/${encodeURIComponent(room.threadId)}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        renderRedisTab(await response.json());
+        document.getElementById("debug-refresh-status").textContent = `갱신 ${new Date().toLocaleTimeString("ko-KR", { hour12 : false })}`;
+    } catch (error) {
+        redisContainer.innerHTML = "";
+        redisContainer.appendChild(createTextElement("div", `Redis 조회 실패 : ${error.message}`, "text-red-500 dark:text-red-400"));
+    }
+}
+
+function createTextElement(tagName, text, className) {
+    const element = document.createElement(tagName);
+    element.textContent = text;
+    element.className   = className || "";
+    return element;
+}
+
+function createJsonTreeElement(value, keyLabel, depth) {
+    // JSON 값을 접이식 트리(<details>)로 재귀 렌더링한다
+    if (value !== null && typeof value === "object") {
+        const entryList = Object.entries(value);
+        const details   = document.createElement("details");
+        details.open    = depth < 1;
+        const summary   = document.createElement("summary");
+        summary.className = "cursor-pointer select-none hover:bg-slate-100 dark:hover:bg-slate-800 rounded px-0.5";
+        summary.appendChild(createTextElement("span", keyLabel, "text-sky-600 dark:text-sky-400"));
+        summary.appendChild(createTextElement("span", ` ${Array.isArray(value) ? `[${entryList.length}]` : `{${entryList.length}}`}`, "text-slate-400 dark:text-slate-600"));
+        details.appendChild(summary);
+        const childContainer = document.createElement("div");
+        childContainer.className = "pl-4 ml-1 border-l border-slate-200 dark:border-slate-800";
+        for (const [childKey, childValue] of entryList) childContainer.appendChild(createJsonTreeElement(childValue, childKey, depth + 1));
+        details.appendChild(childContainer);
+        return details;
+    }
+    const leaf       = document.createElement("div");
+    const valueClass = typeof value === "number" ? "text-amber-600 dark:text-amber-400"
+                     : (typeof value === "boolean" || value === null) ? "text-violet-600 dark:text-violet-400"
+                     : "text-emerald-700 dark:text-emerald-400";
+    leaf.appendChild(createTextElement("span", keyLabel, "text-sky-600 dark:text-sky-400"));
+    leaf.appendChild(createTextElement("span", " : ", "text-slate-400 dark:text-slate-600"));
+    leaf.appendChild(createTextElement("span", String(JSON.stringify(value)).slice(0, 300), valueClass));
+    return leaf;
+}
+
+function renderRedisTab(snapshot) {
+    const redisContainer = document.getElementById("debug-tab-redis");
+    redisContainer.innerHTML = "";
+    redisContainer.appendChild(createTextElement("div", `thread ${snapshot.thread_id} · 매칭 키 ${snapshot.matched_key_count}개`, "text-slate-400 dark:text-slate-500 mb-1.5"));
+    if (snapshot.keys.length === 0) {
+        redisContainer.appendChild(createTextElement("div", "이 스레드와 관련된 Redis 캐시 키가 없습니다. (오케스트레이터 청크 버퍼는 스트리밍 중에만 존재하고 flush 후 삭제됩니다)", "text-slate-400 dark:text-slate-600"));
+        return;
+    }
+    for (const keySnapshot of snapshot.keys) {
+        const keyBlock = document.createElement("div");
+        keyBlock.className = "mb-2 pb-2 border-b border-slate-100 dark:border-slate-800/60";
+        const keyHeader = document.createElement("div");
+        keyHeader.appendChild(createTextElement("span", keySnapshot.key, "text-indigo-600 dark:text-indigo-400 font-semibold break-all"));
+        keyHeader.appendChild(createTextElement("span", `  (${keySnapshot.type} · ${keySnapshot.length ?? "?"}개 · TTL ${keySnapshot.ttl_second}s)`, "text-slate-400 dark:text-slate-600"));
+        keyBlock.appendChild(keyHeader);
+        keyBlock.appendChild(createJsonTreeElement(keySnapshot.value, "value", 0));
+        redisContainer.appendChild(keyBlock);
+    }
+}
+
+/* ══════════════════ 채팅방 정보 탭 : 메타데이터 테이블 + CSV 저장 ══════════════════ */
+
+function collectRoomInfoRows() {
+    // CSV/테이블 공용 데이터 (Run ID 는 오케스트레이터(8000) 잡 파이프라인 전용 개념이라 이 채팅 스트림에서는 미발급)
+    return roomList.map(room => ({
+        "제목"      : room.title,
+        "Room ID"   : room.roomId,
+        "Thread ID" : room.threadId,
+        "Run ID"    : "— (미발급)",
+        "모델"      : room.model || "(기본)",
+        "생각 정도" : room.reasoningEffort || "(기본)",
+        "메시지 수" : room.messages === null ? "(미로드)" : room.messages.length,
+        "활성"      : room.roomId === activeRoomId ? "●" : ""
+    }));
+}
+
+function renderRoomInfoTab() {
+    const infoContainer = document.getElementById("debug-tab-info");
+    infoContainer.innerHTML = "";
+    const summaryLine = document.createElement("div");
+    summaryLine.className = "mb-2 text-[11px] text-slate-500 dark:text-slate-400 font-mono";
+    summaryLine.textContent = `User ID : ${getUserId()}   ·   API : ${getApiUrl()}   ·   방 ${roomList.length}개`;
+    infoContainer.appendChild(summaryLine);
+
+    const infoRowList = collectRoomInfoRows();
+    const table = document.createElement("table");
+    table.className = "w-full text-[11px] border-collapse";
+    const headerRow = document.createElement("tr");
+    for (const columnName of Object.keys(infoRowList[0] || { "제목" : "" })) {
+        const th = createTextElement("th", columnName, "text-left px-2 py-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-medium border border-slate-200 dark:border-slate-700 whitespace-nowrap");
+        headerRow.appendChild(th);
+    }
+    table.appendChild(headerRow);
+    for (const infoRow of infoRowList) {
+        const bodyRow = document.createElement("tr");
+        for (const cellValue of Object.values(infoRow)) {
+            const td = createTextElement("td", String(cellValue), "px-2 py-1 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 font-mono break-all");
+            bodyRow.appendChild(td);
+        }
+        table.appendChild(bodyRow);
+    }
+    infoContainer.appendChild(table);
+}
+
+function downloadRoomInfoCsv() {
+    const infoRowList = collectRoomInfoRows();
+    const csvRowList  = [
+        ["User ID", getUserId()], ["내보낸 시각", new Date().toISOString()], [],
+        Object.keys(infoRowList[0] || {}),
+        ...infoRowList.map(infoRow => Object.values(infoRow))
+    ];
+    const escapeCsvCell = (cellValue) => `"${String(cellValue).replaceAll('"', '""')}"`;
+    const csvText = "﻿" + csvRowList.map(csvRow => csvRow.map(escapeCsvCell).join(",")).join("\r\n");   // BOM : 엑셀 한글 호환
+    const downloadLink    = document.createElement("a");
+    downloadLink.href     = URL.createObjectURL(new Blob([csvText], { type : "text/csv;charset=utf-8" }));
+    downloadLink.download = `chat_rooms_${getUserId()}_${new Date().toISOString().slice(0, 10)}.csv`;
+    downloadLink.click();
+    URL.revokeObjectURL(downloadLink.href);
 }
 
 /* ══════════════════ 렌더링 ══════════════════ */
@@ -274,6 +680,12 @@ function renderActiveRoom() {
     setStatus("대기", "bg-slate-400 dark:bg-slate-600");
 
     messageFeed.innerHTML = "";
+    if (room.messages === null) {
+        // 다른 기기/재접속으로 로컬 캐시가 없는 방 : 서버(LangGraph 체크포인트)에서 대화를 복원한다
+        messageFeed.innerHTML = `<div class="text-center pt-10 text-slate-400 dark:text-slate-600 text-sm">대화 내용을 불러오는 중…</div>`;
+        restoreRoomMessagesAsync(room);
+        return;
+    }
     if (room.messages.length === 0) {
         messageFeed.innerHTML = `<div class="text-center pt-10">
             <p class="text-slate-400 dark:text-slate-600 text-sm">메시지를 보내 오케스트레이터와 대화를 시작하세요.</p>
@@ -288,11 +700,26 @@ function renderActiveRoom() {
     scrollFeedToBottom();
 }
 
+async function restoreRoomMessagesAsync(room) {
+    // 체크포인트 → 표시용 메시지 복원 : 완료 후 해당 방이 여전히 활성 상태면 다시 렌더링한다
+    try {
+        const response = await fetch(`${getApiUrl()}/threads/${encodeURIComponent(room.threadId)}/messages`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        room.messages = (await response.json()).messages.map(serverMessage => ({ role : serverMessage.role, text : serverMessage.text, reasoning : serverMessage.reasoning || "" }));
+    } catch (error) {
+        room.messages = [];
+        showToast(`⚠ 대화 복원 실패 (${error.message}) — 빈 대화로 시작합니다.`);
+    }
+    saveRooms();
+    if (activeRoomId === room.roomId) renderActiveRoom();
+}
+
 function onModelChanged() {
     const room = getActiveRoom();
     room.model = document.getElementById("model-select").value;
     document.getElementById("header-model").textContent = room.model || "기본 모델";
     saveRooms();
+    syncRoomToServerAsync(room);
     renderRoomList();
 }
 
@@ -301,11 +728,12 @@ function onReasoningEffortChanged() {
     const room = getActiveRoom();
     room.reasoningEffort = document.getElementById("reasoning-effort-select").value;
     saveRooms();
+    syncRoomToServerAsync(room);
 }
 
-async function loadModelOptions(retryCount = 5) {
+async function loadModelOptions(attemptCount = 0) {
     // 백엔드 GET /models 로 모델 목록을 드롭다운에 채운다.
-    // 백엔드보다 페이지를 먼저 연 경우를 위해 실패 시 3초 간격으로 재시도한다 (최종 실패 시 기본 모델로 동작)
+    // 백엔드보다 페이지를 먼저 연 경우를 위해 스트림과 동일한 지수 백오프(1초→2초→4초, 최대 3회)로 재시도한다
     const apiUrl = document.getElementById("api-url").value.trim().replace(/\/+$/, "");
     try {
         const response = await fetch(`${apiUrl}/models`);
@@ -328,7 +756,12 @@ async function loadModelOptions(retryCount = 5) {
         if (isRoomListDirty) { saveRooms(); renderRoomList(); document.getElementById("header-model").textContent = getActiveRoom()?.model || "기본 모델"; }
         modelSelect.value = getActiveRoom()?.model || "";
     } catch (error) {
-        if (retryCount > 0) { setTimeout(() => loadModelOptions(retryCount - 1), 3000); return; }
+        if (attemptCount < STREAM_MAX_RETRY_COUNT) {
+            const backoffDelayMs = STREAM_BASE_DELAY_MS * 2 ** attemptCount;   // 1초 → 2초 → 4초
+            setTimeout(() => loadModelOptions(attemptCount + 1), backoffDelayMs);
+            return;
+        }
+        showToast(`⚠ 모델 목록 로드 실패 (${error.message})\n기본 모델로 동작합니다. 백엔드 확인 후 새로고침하세요.`);
         appendSystemNotice(`모델 목록 로드 실패 (${error.message}) — 기본 모델로 동작합니다.`);
     }
 }
@@ -510,9 +943,10 @@ async function sendMessage() {
     if (!message || isStreaming || !room) return;
 
     // ① 사용자 메시지를 즉시 렌더링·저장하고 입력창을 비운다 (첫 메시지는 방 제목이 된다)
+    if (room.messages === null) room.messages = [];   // 서버 복원이 끝나기 전 전송한 경우 : 빈 목록으로 시작
     appendUserBubble(message);
     room.messages.push({ role : "user", text : message });
-    if (room.title === "새 대화") { room.title = message.slice(0, 24); renderRoomList(); document.getElementById("header-room-title").textContent = room.title; }
+    if (room.title === "새 대화") { room.title = message.slice(0, 24); renderRoomList(); document.getElementById("header-room-title").textContent = room.title; syncRoomToServerAsync(room); }
     saveRooms();
     chatInput.value        = "";
     chatInput.style.height = "auto";
@@ -620,11 +1054,19 @@ chatInput.addEventListener("input", () => {
 });
 
 /* ══════════════════ 초기화 ══════════════════ */
-loadRooms();
-renderRoomList();
-renderActiveRoom();
-loadModelOptions();
-chatInput.focus();
+(async function initializeApplication() {
+    initializeUserId();                                                              // 사용자 ID 복원 (없으면 자동 발급)
+    loadPanelState();                                                                // 패널 크기/접기 상태 복원
+    applySidebarState();
+    initializePanelResizeHandles();
+    applyDeveloperMode(localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === "on");   // 개발자 모드 저장값 복원 (기본 : 꺼짐, 디버그 패널 포함)
+    await loadRoomsAsync();                                                          // 서버에서 유저별 방 목록 로드 (실패 시 로컬 캐시 폴백)
+    renderRoomList();
+    renderActiveRoom();
+    loadModelOptions();
+    refreshDebugTabs();                                                              // 방 로드 후 디버그 패널 데이터 갱신
+    chatInput.focus();
+})();
 </script>
 </body>
 </html>

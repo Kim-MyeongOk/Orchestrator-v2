@@ -141,6 +141,34 @@ def _create_compiled_graph(checkpoint_saver, model_name : Optional[str] = None, 
 # FastAPI 애플리케이션
 ##################################################
 
+def _extract_message_texts(message : BaseMessage) -> tuple:
+    # 저장 메시지 1건에서 (본문 텍스트, 생각 텍스트) 를 추출한다
+    # ollama 는 additional_kwargs.reasoning_content, google(Gemini) 은 content 리스트의 thinking 블록
+    reasoning_text = (getattr(message, "additional_kwargs", None) or {}).get("reasoning_content", "") or ""
+    body_text      = ""
+    if isinstance(message.content, str):
+        body_text = message.content
+    elif isinstance(message.content, list):
+        for content_block in message.content:
+            if isinstance(content_block, str):
+                body_text += content_block
+            elif isinstance(content_block, dict):
+                if content_block.get("type") == "thinking":
+                    reasoning_text += content_block.get("thinking", "")
+                elif content_block.get("type") == "text":
+                    body_text += content_block.get("text", "")
+    return body_text.strip(), reasoning_text
+
+
+class RoomUpsertRequest(BaseModel):
+    user_id          : str
+    room_id          : str
+    thread_id        : str
+    title            : str            = "새 대화"
+    model            : Optional[str]  = None
+    reasoning_effort : Optional[str]  = None
+
+
 class StreamRequest(BaseModel):
     thread_id         : str
     message           : str
@@ -158,9 +186,16 @@ class MonitorApplication:
         self.application               = FastAPI(title = "Think Bottleneck Monitor", lifespan = self._lifespan_async)
         # 로컬 진단 대시보드(frontend/index.html 을 file:// 로 직접 오픈)에서의 fetch 를 허용한다
         self.application.add_middleware(CORSMiddleware, allow_origins = ["*"], allow_methods = ["*"], allow_headers = ["*"])
-        self.application.add_api_route("/diagnose", self.diagnose_thread_async, methods = ["GET"])
-        self.application.add_api_route("/models",   self.list_models_async,     methods = ["GET"])
-        self.application.add_api_route("/stream",   self.stream_async,          methods = ["POST"])
+        self.application.add_api_route("/diagnose",                    self.diagnose_thread_async,    methods = ["GET"])
+        self.application.add_api_route("/models",                      self.list_models_async,        methods = ["GET"])
+        self.application.add_api_route("/stream",                      self.stream_async,             methods = ["POST"])
+        # 유저별 채팅방 목록 영속화 : 목록/메타는 chat_room 테이블, 대화 내용은 LangGraph 체크포인트에서 복원
+        self.application.add_api_route("/rooms",                       self.list_rooms_async,         methods = ["GET"])
+        self.application.add_api_route("/rooms",                       self.upsert_room_async,        methods = ["POST"])
+        self.application.add_api_route("/rooms/{room_id}",             self.delete_room_async,        methods = ["DELETE"])
+        self.application.add_api_route("/threads/{thread_id}/messages", self.get_thread_messages_async, methods = ["GET"])
+        self.application.add_api_route("/redis/{thread_id}",           self.get_redis_snapshot_async,  methods = ["GET"])   # 디버그 패널용 Redis 캐시 조회
+        self.redis_client = None   # 지연 생성 (디버그 패널에서 처음 조회할 때 연결)
 
     def _get_or_create_compiled_graph(self, model_name : Optional[str], reasoning_effort : Optional[str] = None):
         # (모델, 생각 강도)별 그래프를 지연 생성해 캐싱한다 (같은 체크포인터를 공유하므로 스레드 이력은 설정과 무관하게 이어진다)
@@ -210,10 +245,108 @@ class MonitorApplication:
 
         self.checkpoint_saver = checkpoint_saver
         self._get_or_create_compiled_graph(None)   # 기본 모델 그래프 선생성
+
+        # 유저별 채팅방 목록 테이블 (대화 내용은 체크포인트가 원본이므로 여기는 목록/메타만 저장)
+        async with self.checkpoint_connection_pool.connection() as connection:
+            await connection.execute("""
+CREATE TABLE IF NOT EXISTS chat_room
+(
+    room_id          TEXT        PRIMARY KEY,
+    user_id          TEXT        NOT NULL,
+    thread_id        TEXT        NOT NULL,
+    title            TEXT        NOT NULL DEFAULT '새 대화',
+    model            TEXT,
+    reasoning_effort TEXT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, updated_at DESC);
+""")
         try:
             yield
         finally:
             await self.checkpoint_connection_pool.close()
+
+    async def list_rooms_async(self, user_id : str) -> Dict[str, Any]:
+        async with self.checkpoint_connection_pool.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT room_id, thread_id, title, model, reasoning_effort FROM chat_room WHERE user_id = %s ORDER BY updated_at DESC", (user_id,))
+            room_row_list = await cursor.fetchall()
+        return {"rooms" : [dict(room_row) for room_row in room_row_list]}
+
+    async def upsert_room_async(self, room_request : RoomUpsertRequest) -> Dict[str, Any]:
+        async with self.checkpoint_connection_pool.connection() as connection:
+            await connection.execute(
+                "INSERT INTO chat_room (room_id, user_id, thread_id, title, model, reasoning_effort) VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (room_id) DO UPDATE SET thread_id = EXCLUDED.thread_id, title = EXCLUDED.title, model = EXCLUDED.model, "
+                "reasoning_effort = EXCLUDED.reasoning_effort, updated_at = NOW()",
+                (room_request.room_id, room_request.user_id, room_request.thread_id, room_request.title, room_request.model, room_request.reasoning_effort))
+        return {"status" : "ok"}
+
+    async def delete_room_async(self, room_id : str, user_id : str) -> Dict[str, Any]:
+        # 목록에서만 제거한다 (체크포인트 대화 원본은 retention 배치가 유휴 기준으로 정리)
+        async with self.checkpoint_connection_pool.connection() as connection:
+            cursor = await connection.execute("DELETE FROM chat_room WHERE room_id = %s AND user_id = %s", (room_id, user_id))
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code = 404, detail = f"ROOM NOT FOUND : {room_id}")
+        return {"status" : "deleted"}
+
+    async def get_redis_snapshot_async(self, thread_id : str) -> Dict[str, Any]:
+        # 디버그 패널용 : 해당 스레드와 관련된 Redis 키를 실시간 스냅샷으로 반환한다
+        # (오케스트레이터 파이프라인의 청크 버퍼 키 형식 : orch:{thread_id}:run:{run_id}:chunk_list)
+        import redis.asyncio as redis_asyncio
+        if self.redis_client is None:
+            self.redis_client = redis_asyncio.Redis(
+                host = os.getenv("REDIS_HOST", "localhost"),
+                port = int(os.getenv("REDIS_PORT", "6379")),
+                db   = int(os.getenv("REDIS_DATABASE_INDEX", "0"))
+            )
+        def try_parse_json(raw_value):
+            text = raw_value.decode("utf-8", errors = "replace") if isinstance(raw_value, bytes) else str(raw_value)
+            try:
+                return json.loads(text)
+            except Exception:
+                return text
+        try:
+            matched_key_list = []
+            async for key_bytes in self.redis_client.scan_iter(match = f"*{thread_id}*", count = 200):
+                matched_key_list.append(key_bytes.decode("utf-8", errors = "replace"))
+                if len(matched_key_list) >= 50:   # 디버그 표시용 상한
+                    break
+            key_snapshot_list = []
+            for key_name in sorted(matched_key_list):
+                key_type = (await self.redis_client.type(key_name)).decode()
+                ttl_second_count = await self.redis_client.ttl(key_name)
+                if key_type == "list":
+                    total_length = await self.redis_client.llen(key_name)
+                    value = [try_parse_json(item) for item in await self.redis_client.lrange(key_name, -30, -1)]   # 최근 30개만
+                elif key_type == "hash":
+                    total_length = await self.redis_client.hlen(key_name)
+                    value = {field.decode("utf-8", "replace") : try_parse_json(item) for field, item in (await self.redis_client.hgetall(key_name)).items()}
+                elif key_type == "string":
+                    total_length = 1
+                    value = try_parse_json(await self.redis_client.get(key_name))
+                else:
+                    total_length = None
+                    value = f"(미지원 타입 : {key_type})"
+                key_snapshot_list.append({"key" : key_name, "type" : key_type, "ttl_second" : ttl_second_count, "length" : total_length, "value" : value})
+            return {"thread_id" : thread_id, "matched_key_count" : len(matched_key_list), "keys" : key_snapshot_list}
+        except Exception as exception:
+            raise HTTPException(status_code = 502, detail = f"REDIS SNAPSHOT FAILED : {exception}")
+
+    async def get_thread_messages_async(self, thread_id : str) -> Dict[str, Any]:
+        # 대화 내용 복원 : LangGraph 체크포인트(messages 채널)를 표시용 [{role, text, reasoning}] 으로 변환한다
+        state_snapshot = await self._get_or_create_compiled_graph(None, None).aget_state({"configurable" : {"thread_id" : thread_id}})
+        message_list   = state_snapshot.values.get("messages", []) if state_snapshot else []
+        display_message_list = []
+        for message in message_list:
+            message_type = type(message).__name__
+            body_text, reasoning_text = _extract_message_texts(message)
+            if message_type == "HumanMessage" and body_text:
+                display_message_list.append({"role" : "user", "text" : body_text})
+            elif message_type in ("AIMessage", "AIMessageChunk") and body_text:   # 도구 호출 전용(본문 없는) AI 메시지는 표시에서 제외
+                display_message_list.append({"role" : "agent", "text" : body_text, "reasoning" : reasoning_text or None})
+        return {"thread_id" : thread_id, "messages" : display_message_list}
 
     async def diagnose_thread_async(self, thread_id : str) -> Dict[str, Any]:
         # ① 순수 체크포인트 로드 시간 : aget_state 전후를 perf_counter 로 측정한다
