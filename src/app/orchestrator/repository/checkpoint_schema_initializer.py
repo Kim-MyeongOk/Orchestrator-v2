@@ -14,9 +14,9 @@
 # 파티션 테이블에 CONCURRENTLY 인덱스 생성을 금지하므로 파티션 테이블만 먼저
 # 만들어 두면 setup() 이 크래시한다. 따라서 여기서 최종 스키마 전체(테이블 +
 # 일반 CREATE INDEX)를 직접 생성하고 checkpoint_migrations 에 버전 행을
-# 선주입하여 setup() 이 전부 스킵하도록 만든다. 버전 수는 패키지의 MIGRATIONS
-# 리스트 길이로 동적 계산하므로, 패키지 업그레이드로 신규 마이그레이션이 추가되면
-# setup() 이 그것만 이어서 적용한다.
+# 선주입하여 setup() 이 전부 스킵하도록 만든다. 패키지 업그레이드로 신규
+# 마이그레이션이 추가된 경우에도 setup() 에 맡기지 않고(CONCURRENTLY 크래시),
+# CONCURRENTLY 를 일반 CREATE INDEX 로 치환해 여기서 직접 이어서 적용한다.
 ##################################################
 
 from langgraph.checkpoint.postgres.base import MIGRATIONS
@@ -98,13 +98,27 @@ CREATE INDEX IF NOT EXISTS checkpoint_writes_thread_id_idx ON checkpoint_writes 
                 )
         return "\n".join(partition_ddl_list)
 
+    @staticmethod
+    async def _apply_missing_migrations_async(connection) -> None:
+        # 패키지 업그레이드로 추가된 미적용 마이그레이션을 파티션 안전형으로 적용한다.
+        # 파티션 테이블에는 CREATE INDEX CONCURRENTLY 가 금지라 setup() 이 크래시하므로,
+        # 일반 CREATE INDEX 로 치환해 여기서 선적용하고 버전을 기록해 setup() 이 전부 스킵하게 만든다
+        applied_version_set = {version_row["v"] for version_row in await connection.fetch("SELECT v FROM checkpoint_migrations")}
+        for migration_version, migration_sql in enumerate(MIGRATIONS):
+            if migration_version in applied_version_set:
+                continue
+            await connection.execute(migration_sql.replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX"))
+            await connection.execute("INSERT INTO checkpoint_migrations (v) VALUES ($1) ON CONFLICT (v) DO NOTHING", migration_version)
+            print(f"CHECKPOINT MIGRATION APPLIED : VERSION {migration_version}", flush = True)
+
     async def initialize_schema_async(self) -> bool:
         # 반환값 : 이번 호출에서 파티션 스키마를 새로 생성했으면 True
         async with self.postgresql_pool_manager.get_pool().acquire() as connection:
-            # 이미 checkpoints 테이블이 존재하면(파티션 여부 무관) 손대지 않고 setup() 에 위임한다
-            # (기존 비파티션 설치본과의 호환 — 파티션 전환은 데이터 이관이 필요한 운영 작업이다)
+            # 이미 checkpoints 테이블이 존재하면 스키마는 손대지 않되, 패키지 업그레이드로 추가된
+            # 신규 마이그레이션만 파티션 안전형으로 이어서 적용한다 (미적용 상태로 두면 setup() 이 크래시)
             existing_table_kind = await connection.fetchval("SELECT relkind FROM pg_class WHERE relname = 'checkpoints' AND relnamespace = 'public'::regnamespace")
             if existing_table_kind is not None:
+                await CheckpointSchemaInitializer._apply_missing_migrations_async(connection)
                 return False
             async with connection.transaction():
                 partition_ddl_text = CheckpointSchemaInitializer._create_partition_ddl_text(self.partition_count)

@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>API Client — Orchestrator Dev</title>
+<!-- 빌드 도구 없이 즉시 동작 : Tailwind CDN (개발 도구 페이지 — 다크 고정) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+    .scroll-slim::-webkit-scrollbar       { width: 6px; height: 6px; }
+    .scroll-slim::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    .scroll-slim::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body class="bg-slate-950 text-slate-100 h-screen overflow-hidden font-sans antialiased text-sm">
+
+<div class="h-full flex flex-col">
+    <!-- 상단 바 -->
+    <header class="shrink-0 h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center gap-3">
+        <span class="text-xs font-bold tracking-tight">⚡ API Client</span>
+        <span class="text-[10px] text-slate-500 font-mono" id="base-url-label"></span>
+    </header>
+
+    <div class="flex-1 flex min-h-0">
+        <!-- ══ 좌측 : 엔드포인트 트리 ══ -->
+        <aside class="w-64 shrink-0 border-r border-slate-800 bg-slate-900/60 flex flex-col min-h-0">
+            <div class="px-3 py-2 text-[10px] font-semibold text-slate-500 uppercase tracking-wider border-b border-slate-800">Backend Endpoints</div>
+            <nav id="endpoint-tree" class="scroll-slim flex-1 overflow-y-auto p-2 space-y-0.5"></nav>
+        </aside>
+
+        <!-- ══ 우측 : 요청 빌더 + 응답 뷰어 ══ -->
+        <main class="flex-1 flex flex-col min-w-0 min-h-0">
+            <!-- 주소창 -->
+            <div class="shrink-0 p-3 border-b border-slate-800 flex gap-2 items-center">
+                <select id="method-select" class="shrink-0 bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs font-mono font-bold focus:outline-none focus:border-indigo-500">
+                    <option>GET</option><option>POST</option><option>DELETE</option><option>PUT</option><option>PATCH</option>
+                </select>
+                <input id="url-input" type="text" spellcheck="false"
+                       class="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:border-indigo-500">
+                <button id="run-button" onclick="runRequest()"
+                        class="shrink-0 px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-bold transition disabled:opacity-40">Run ▶</button>
+            </div>
+
+            <!-- Params / Body / Headers 탭 -->
+            <div class="shrink-0 border-b border-slate-800">
+                <div class="flex gap-1 px-3 pt-2">
+                    <button onclick="switchRequestTab('params')"  data-request-tab="params"  class="request-tab-button px-3 py-1.5 rounded-t text-[11px] font-medium">Params</button>
+                    <button onclick="switchRequestTab('body')"    data-request-tab="body"    class="request-tab-button px-3 py-1.5 rounded-t text-[11px] font-medium">Body</button>
+                    <button onclick="switchRequestTab('headers')" data-request-tab="headers" class="request-tab-button px-3 py-1.5 rounded-t text-[11px] font-medium">Headers</button>
+                </div>
+                <div id="request-tab-params" class="request-tab-content p-3 space-y-1.5">
+                    <div id="params-row-container" class="space-y-1.5"></div>
+                    <button onclick="addKeyValueRow('params-row-container')" class="text-[11px] text-indigo-400 hover:text-indigo-300 transition">＋ Add Param</button>
+                </div>
+                <div id="request-tab-body" class="request-tab-content hidden p-3">
+                    <textarea id="body-textarea" rows="7" spellcheck="false"
+                              class="scroll-slim w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-[11px] font-mono leading-relaxed resize-y focus:outline-none focus:border-indigo-500"></textarea>
+                    <div class="mt-1 flex gap-3">
+                        <button onclick="addBodyField()"   class="text-[11px] text-indigo-400 hover:text-indigo-300 transition">＋ Add Field</button>
+                        <button onclick="formatBodyJson()" class="text-[11px] text-indigo-400 hover:text-indigo-300 transition">JSON 정렬</button>
+                        <span id="body-json-status" class="text-[10px] text-slate-600"></span>
+                    </div>
+                </div>
+                <div id="request-tab-headers" class="request-tab-content hidden p-3 space-y-1.5">
+                    <div id="headers-row-container" class="space-y-1.5"></div>
+                    <button onclick="addKeyValueRow('headers-row-container')" class="text-[11px] text-indigo-400 hover:text-indigo-300 transition">＋ Add Header</button>
+                </div>
+            </div>
+
+            <!-- 응답 뷰어 -->
+            <div class="flex-1 flex flex-col min-h-0">
+                <div class="shrink-0 px-3 py-2 border-b border-slate-800 flex items-center gap-3">
+                    <span class="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Response</span>
+                    <span id="response-status-badge" class="hidden px-2 py-0.5 rounded-full text-[10px] font-bold"></span>
+                    <span id="response-meta" class="text-[10px] text-slate-500 font-mono"></span>
+                    <div class="ml-auto flex items-center gap-1 text-[10px]">
+                        <button onclick="setResponseViewMode('raw')"    data-view-mode="raw"    class="view-mode-button px-2.5 py-1 rounded-l-lg border border-slate-700 transition">Raw Chunk</button>
+                        <button onclick="setResponseViewMode('merged')" data-view-mode="merged" class="view-mode-button px-2.5 py-1 rounded-r-lg border border-l-0 border-slate-700 transition">자동 병합</button>
+                    </div>
+                </div>
+                <div id="response-viewer" class="scroll-slim flex-1 overflow-auto p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-slate-300"></div>
+            </div>
+        </main>
+    </div>
+</div>
+
+<script>
+/* ══════════════════ 엔드포인트 카탈로그 ══════════════════ */
+
+// 이 페이지는 모니터 백엔드(:8002)가 직접 서빙한다. 메인 서버(:8000)는 같은 호스트의 8000 포트로 추정한다.
+// (file:// 로 직접 연 경우 origin 이 "null" 이므로 localhost 기본값으로 폴백)
+const MONITOR_BASE_URL = window.location.origin.startsWith("http") ? window.location.origin : "http://localhost:8002";
+const MAIN_BASE_URL    = (() => { const mainUrl = new URL(MONITOR_BASE_URL); mainUrl.port = "8000"; return mainUrl.origin; })();
+const DEV_USER_ID      = "11111111-1111-4111-8111-111111111111";   // 메인 서버 API 의 X-User-Id 헤더 기본값 (UUID 형식 필수)
+document.getElementById("base-url-label").textContent = `monitor ${MONITOR_BASE_URL} · main ${MAIN_BASE_URL}`;
+
+const ENDPOINT_CATALOG = [
+    /* ── 모니터 앱 (:8002) — 채팅 UI 백엔드 ── */
+    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "POST",   path : "/stream",                       description : "LangGraph 스트리밍 대화 (NDJSON)", isStream : true,
+      bodyExample : { thread_id : crypto.randomUUID(), message : "1 더하기 1은? 숫자만 답해.", model : null, reasoning_effort : null, include_reasoning : true } },
+    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/models",                       description : "사용 가능 모델 목록" },
+    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/diagnose",                     description : "체크포인트 진단 (로드시간/메시지 수/생각 크기)", params : { thread_id : "" } },
+    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/rooms",                        description : "유저별 채팅방 목록", params : { user_id : "" } },
+    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "POST",   path : "/rooms",                        description : "채팅방 생성/갱신 (upsert)",
+      bodyExample : { user_id : "dev-test", room_id : crypto.randomUUID(), thread_id : crypto.randomUUID(), title : "API 테스트 방", model : null, reasoning_effort : null } },
+    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "DELETE", path : "/rooms/{room_id}",              description : "채팅방 삭제 (소유자만)", params : { user_id : "" } },
+    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/threads/{thread_id}/messages", description : "체크포인트에서 대화 복원" },
+    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/redis/{thread_id}",            description : "스레드 관련 Redis 캐시 스냅샷" },
+
+    /* ── 메인 서버 (:8000) — LLM Job 파이프라인 (X-User-Id 헤더 필수) ── */
+    { group : "Main · :8000 LLM Jobs", baseUrl : MAIN_BASE_URL, method : "POST",   path : "/llm/chat",                  description : "동기 채팅 (SSE 스트림, job 자동 생성)", isStream : true, headers : { "X-User-Id" : DEV_USER_ID },
+      bodyExample : { thread_id : null, messages : [{ role : "user", content : "1 더하기 1은? 숫자만 답해." }], output_format : "deepagents", model : null } },
+    { group : "Main · :8000 LLM Jobs", baseUrl : MAIN_BASE_URL, method : "POST",   path : "/llm/jobs",                  description : "비동기 job 제출 (202 + run_id)", headers : { "X-User-Id" : DEV_USER_ID },
+      bodyExample : { thread_id : null, messages : [{ role : "user", content : "비동기로 처리할 질문" }], output_format : "deepagents", model : null, idempotency_key : null } },
+    { group : "Main · :8000 LLM Jobs", baseUrl : MAIN_BASE_URL, method : "GET",    path : "/llm/jobs",                  description : "job 목록 (커서 페이지네이션)", headers : { "X-User-Id" : DEV_USER_ID }, params : { status : "", job_type : "", cursor : "", limit : "20" } },
+    { group : "Main · :8000 LLM Jobs", baseUrl : MAIN_BASE_URL, method : "GET",    path : "/llm/jobs/{run_id}",         description : "job 상태/결과 조회", headers : { "X-User-Id" : DEV_USER_ID } },
+    { group : "Main · :8000 LLM Jobs", baseUrl : MAIN_BASE_URL, method : "GET",    path : "/llm/jobs/{run_id}/stream",  description : "job SSE 재구독 (Last-Event-ID 이어받기)", isStream : true, headers : { "X-User-Id" : DEV_USER_ID }, params : { format : "", include_events : "false" } },
+    { group : "Main · :8000 LLM Jobs", baseUrl : MAIN_BASE_URL, method : "DELETE", path : "/llm/jobs/{run_id}",         description : "job 취소", headers : { "X-User-Id" : DEV_USER_ID } },
+    { group : "Main · :8000 LLM Jobs", baseUrl : MAIN_BASE_URL, method : "GET",    path : "/llm/jobs/{run_id}/timeline", description : "job 이벤트 타임라인", headers : { "X-User-Id" : DEV_USER_ID }, params : { after_seq : "0", limit : "500" } },
+    { group : "Main · :8000 LLM Jobs", baseUrl : MAIN_BASE_URL, method : "GET",    path : "/llm/threads",               description : "스레드 목록 (커서 페이지네이션)", headers : { "X-User-Id" : DEV_USER_ID }, params : { cursor : "", limit : "20" } },
+    { group : "Main · :8000 LLM Jobs", baseUrl : MAIN_BASE_URL, method : "GET",    path : "/llm/threads/{thread_id}",   description : "스레드 상세 (메시지 이력)", headers : { "X-User-Id" : DEV_USER_ID }, params : { limit : "100" } },
+
+    /* ── 메인 서버 (:8000) — 오케스트레이터 ── */
+    { group : "Main · :8000 Orchestrator", baseUrl : MAIN_BASE_URL, method : "POST", path : "/api/v1/orchestrator/stream", description : "오케스트레이터 그래프 스트리밍 (SSE)", isStream : true, headers : { "X-User-Id" : DEV_USER_ID },
+      bodyExample : { thread_id : null, user_message : "안녕! 자기소개 해줘.", files_metadata : null } }
+];
+
+const METHOD_COLOR_MAP = { GET : "text-emerald-400", POST : "text-amber-400", DELETE : "text-red-400", PUT : "text-sky-400", PATCH : "text-violet-400" };
+
+function renderEndpointTree() {
+    const treeContainer = document.getElementById("endpoint-tree");
+    let previousGroupName = null;
+    for (const endpoint of ENDPOINT_CATALOG) {
+        if (endpoint.group !== previousGroupName) {
+            // 그룹 헤더 : 서버(포트)별 섹션 구분
+            previousGroupName = endpoint.group;
+            treeContainer.appendChild(Object.assign(document.createElement("div"), {
+                className   : "px-2 pt-3 pb-1 text-[10px] font-bold text-slate-500 uppercase tracking-wider",
+                textContent : endpoint.group
+            }));
+        }
+        const item = document.createElement("button");
+        item.className = "w-full text-left px-2 py-1.5 rounded-lg hover:bg-slate-800 transition group";
+        item.onclick   = () => loadEndpoint(endpoint);
+        item.innerHTML = `<div class="flex items-center gap-2"><span class="w-12 shrink-0 text-[10px] font-mono font-bold ${METHOD_COLOR_MAP[endpoint.method] || ""}">${endpoint.method}</span><span class="text-[11px] font-mono text-slate-300 truncate">${endpoint.path}</span></div><div class="pl-14 text-[10px] text-slate-600 group-hover:text-slate-500 truncate">${endpoint.description}</div>`;
+        treeContainer.appendChild(item);
+    }
+}
+
+/* ══════════════════ 요청 빌더 ══════════════════ */
+
+let currentEndpointIsStream = false;
+
+function addKeyValueRow(containerId, keyText = "", valueText = "") {
+    const row = document.createElement("div");
+    row.className = "flex gap-1.5 items-center kv-row";
+    row.innerHTML = `
+        <input placeholder="key"   value="" class="kv-key   flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-[11px] font-mono focus:outline-none focus:border-indigo-500">
+        <input placeholder="value" value="" class="kv-value flex-[2] min-w-0 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-[11px] font-mono focus:outline-none focus:border-indigo-500">
+        <button class="shrink-0 w-5 h-5 rounded text-slate-600 hover:text-red-400 transition text-xs" title="삭제">✕</button>`;
+    row.querySelector(".kv-key").value   = keyText;
+    row.querySelector(".kv-value").value = valueText;
+    row.querySelector("button").onclick  = () => row.remove();
+    document.getElementById(containerId).appendChild(row);
+}
+
+function collectKeyValueRows(containerId) {
+    const pairList = [];
+    document.getElementById(containerId).querySelectorAll(".kv-row").forEach(row => {
+        const key = row.querySelector(".kv-key").value.trim();
+        if (key) pairList.push([key, row.querySelector(".kv-value").value]);
+    });
+    return pairList;
+}
+
+function loadEndpoint(endpoint) {
+    document.getElementById("method-select").value = endpoint.method;
+    document.getElementById("url-input").value     = (endpoint.baseUrl || MONITOR_BASE_URL) + endpoint.path;   // {room_id} 등 경로 변수는 주소창에서 직접 수정
+    currentEndpointIsStream = Boolean(endpoint.isStream);
+
+    document.getElementById("params-row-container").innerHTML = "";
+    for (const [paramKey, paramValue] of Object.entries(endpoint.params || {})) addKeyValueRow("params-row-container", paramKey, paramValue);
+
+    document.getElementById("headers-row-container").innerHTML = "";
+    for (const [headerName, headerValue] of Object.entries(endpoint.headers || {})) addKeyValueRow("headers-row-container", headerName, headerValue);
+    if (endpoint.bodyExample) addKeyValueRow("headers-row-container", "Content-Type", "application/json");
+
+    document.getElementById("body-textarea").value      = endpoint.bodyExample ? JSON.stringify(endpoint.bodyExample, null, 2) : "";
+    document.getElementById("body-json-status").textContent = "";
+    switchRequestTab(endpoint.bodyExample ? "body" : (endpoint.params ? "params" : "params"));
+}
+
+function switchRequestTab(tabName) {
+    document.querySelectorAll(".request-tab-button").forEach(tabButton => {
+        const isActive = tabButton.dataset.requestTab === tabName;
+        tabButton.className = "request-tab-button px-3 py-1.5 rounded-t text-[11px] font-medium transition " +
+            (isActive ? "bg-slate-800 text-slate-100" : "text-slate-500 hover:text-slate-300");
+    });
+    document.querySelectorAll(".request-tab-content").forEach(tabContent => {
+        tabContent.classList.toggle("hidden", tabContent.id !== `request-tab-${tabName}`);
+    });
+}
+
+function addBodyField() {
+    // 현재 Body JSON 에 새 필드를 추가한다 (수정/삭제는 textarea 에서 직접 편집)
+    const bodyTextarea = document.getElementById("body-textarea");
+    let bodyObject = {};
+    try { bodyObject = JSON.parse(bodyTextarea.value || "{}"); } catch (_ignored) {}
+    if (typeof bodyObject !== "object" || bodyObject === null || Array.isArray(bodyObject)) bodyObject = {};
+    let newFieldName   = "new_field";
+    let suffixNumber   = 1;
+    while (newFieldName in bodyObject) newFieldName = `new_field_${++suffixNumber}`;
+    bodyObject[newFieldName] = "";
+    bodyTextarea.value = JSON.stringify(bodyObject, null, 2);
+    bodyTextarea.focus();
+}
+
+function formatBodyJson() {
+    const bodyTextarea = document.getElementById("body-textarea");
+    const statusLabel  = document.getElementById("body-json-status");
+    try {
+        bodyTextarea.value      = JSON.stringify(JSON.parse(bodyTextarea.value), null, 2);
+        statusLabel.textContent = "유효한 JSON ✓";
+        statusLabel.className   = "text-[10px] text-emerald-500";
+    } catch (error) {
+        statusLabel.textContent = `JSON 오류 : ${error.message}`;
+        statusLabel.className   = "text-[10px] text-red-400";
+    }
+}
+
+/* ══════════════════ 실행 + 응답 뷰어 (Raw Chunk / 자동 병합) ══════════════════ */
+
+let responseViewMode  = "merged";   // "raw" | "merged"
+let rawChunkLineList  = [];         // 스트림 원본 라인 (모드 전환 시 재렌더링용)
+let lastPlainResponse = null;       // 비스트리밍 응답 텍스트
+
+function setResponseViewMode(mode) {
+    responseViewMode = mode;
+    document.querySelectorAll(".view-mode-button").forEach(modeButton => {
+        const isActive = modeButton.dataset.viewMode === mode;
+        modeButton.classList.toggle("bg-indigo-600",   isActive);
+        modeButton.classList.toggle("text-white",      isActive);
+        modeButton.classList.toggle("text-slate-400",  !isActive);
+    });
+    rerenderResponseViewer();
+}
+
+function setStatusBadge(statusCode, errorText = null) {
+    const badge = document.getElementById("response-status-badge");
+    badge.classList.remove("hidden");
+    if (errorText !== null) { badge.textContent = "ERROR"; badge.className = "px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-950 text-red-400 border border-red-800"; return; }
+    badge.textContent = String(statusCode);
+    badge.className   = "px-2 py-0.5 rounded-full text-[10px] font-bold border " +
+        (statusCode < 300 ? "bg-emerald-950 text-emerald-400 border-emerald-800"
+       : statusCode < 400 ? "bg-amber-950 text-amber-400 border-amber-800"
+       :                    "bg-red-950 text-red-400 border-red-800");
+}
+
+function rerenderResponseViewer() {
+    const viewer = document.getElementById("response-viewer");
+    if (lastPlainResponse !== null) { viewer.textContent = lastPlainResponse; return; }   // 비스트리밍 : 모드 무관
+    if (rawChunkLineList.length === 0) return;
+    if (responseViewMode === "raw") {
+        // [Raw Chunk] 순수 청크 전체 로그
+        viewer.textContent = rawChunkLineList.join("\n");
+    } else {
+        // [자동 병합] reasoning / message 만 파싱해 실시간 병합
+        // 지원 형식 : ① 모니터 NDJSON {type:"reasoning"|"token"}  ② SSE data: 라인
+        //            (오케스트레이터 chunk_type:"messages" / OpenAI 호환 choices[].delta)
+        let reasoningText = "", messageText = "";
+        const appendFromContentBlocks = (contentBlockList) => {
+            for (const contentBlock of contentBlockList) {
+                if (typeof contentBlock === "string")               messageText   += contentBlock;
+                else if (contentBlock?.type === "thinking")         reasoningText += contentBlock.thinking || "";
+                else if (contentBlock?.type === "text")             messageText   += contentBlock.text || "";
+            }
+        };
+        for (let rawLine of rawChunkLineList) {
+            if (/^(event|id|retry):/.test(rawLine)) continue;      // SSE 제어 라인은 병합 대상이 아님
+            rawLine = rawLine.replace(/^data:\s?/, "");
+            try {
+                const event = JSON.parse(rawLine);
+                if (event.type === "reasoning")  reasoningText += event.text;
+                else if (event.type === "token") messageText   += event.text;
+                else if (event.chunk_type === "messages") {
+                    if (typeof event.content === "string")  messageText += event.content;
+                    else if (Array.isArray(event.content))  appendFromContentBlocks(event.content);
+                }
+                else if (event.choices?.[0]?.delta) {
+                    reasoningText += event.choices[0].delta.reasoning_content || "";
+                    messageText   += event.choices[0].delta.content           || "";
+                }
+            } catch (_ignored) { messageText += rawLine; }   // NDJSON 이 아닌 평문 스트림 폴백
+        }
+        viewer.innerHTML = "";
+        if (reasoningText) {
+            const reasoningBlock = document.createElement("div");
+            reasoningBlock.className = "mb-3 pb-3 border-b border-slate-800";
+            reasoningBlock.innerHTML = `<div class="text-[10px] font-bold text-violet-400 mb-1">🤔 REASONING (${reasoningText.length.toLocaleString()}자)</div>`;
+            const reasoningBody = document.createElement("div");
+            reasoningBody.className   = "text-slate-500 whitespace-pre-wrap";
+            reasoningBody.textContent = reasoningText;
+            reasoningBlock.appendChild(reasoningBody);
+            viewer.appendChild(reasoningBlock);
+        }
+        const messageBlock = document.createElement("div");
+        messageBlock.innerHTML = `<div class="text-[10px] font-bold text-emerald-400 mb-1">💬 MESSAGE</div>`;
+        const messageBody = document.createElement("div");
+        messageBody.className   = "text-slate-200 whitespace-pre-wrap";
+        messageBody.textContent = messageText || "(아직 응답 토큰 없음)";
+        messageBlock.appendChild(messageBody);
+        viewer.appendChild(messageBlock);
+    }
+    viewer.scrollTop = viewer.scrollHeight;
+}
+
+async function runRequest() {
+    const runButton = document.getElementById("run-button");
+    const viewer    = document.getElementById("response-viewer");
+    const method    = document.getElementById("method-select").value;
+    runButton.disabled = true;
+    rawChunkLineList   = [];
+    lastPlainResponse  = null;
+    viewer.textContent = "요청 중…";
+    document.getElementById("response-meta").textContent = "";
+
+    // URL + Params 조립
+    const url = new URL(document.getElementById("url-input").value);
+    for (const [paramKey, paramValue] of collectKeyValueRows("params-row-container")) url.searchParams.set(paramKey, paramValue);
+
+    const requestInit = { method, headers : Object.fromEntries(collectKeyValueRows("headers-row-container")) };
+    const bodyText    = document.getElementById("body-textarea").value.trim();
+    if (bodyText && method !== "GET") requestInit.body = bodyText;
+
+    const startedAt = performance.now();
+    try {
+        const response = await fetch(url, requestInit);
+        setStatusBadge(response.status);
+        const contentType = response.headers.get("content-type") || "";
+        if (currentEndpointIsStream || contentType.includes("ndjson") || contentType.includes("event-stream") || contentType.startsWith("text/plain")) {
+            // 스트리밍 : 라인 단위로 수집하며 현재 모드로 실시간 렌더링
+            viewer.textContent = "";
+            const streamReader = response.body.getReader();
+            const textDecoder  = new TextDecoder("utf-8");
+            let   lineBuffer   = "";
+            while (true) {
+                const { done, value } = await streamReader.read();
+                if (done) break;
+                lineBuffer += textDecoder.decode(value, { stream : true });
+                const completeLines = lineBuffer.split("\n");
+                lineBuffer = completeLines.pop();
+                for (const completeLine of completeLines) if (completeLine.trim()) rawChunkLineList.push(completeLine);
+                rerenderResponseViewer();
+            }
+            if (lineBuffer.trim()) { rawChunkLineList.push(lineBuffer); rerenderResponseViewer(); }
+            document.getElementById("response-meta").textContent = `${Math.round(performance.now() - startedAt).toLocaleString()}ms · ${rawChunkLineList.length}청크`;
+        } else {
+            const responseText = await response.text();
+            try { lastPlainResponse = JSON.stringify(JSON.parse(responseText), null, 2); } catch (_ignored) { lastPlainResponse = responseText; }
+            rerenderResponseViewer();
+            document.getElementById("response-meta").textContent = `${Math.round(performance.now() - startedAt).toLocaleString()}ms · ${responseText.length.toLocaleString()}B`;
+        }
+    } catch (error) {
+        setStatusBadge(0, String(error));
+        lastPlainResponse = `요청 실패 : ${error}`;
+        rerenderResponseViewer();
+    } finally {
+        runButton.disabled = false;
+    }
+}
+
+/* ══════════════════ 초기화 ══════════════════ */
+renderEndpointTree();
+loadEndpoint(ENDPOINT_CATALOG[0]);   // 기본 : POST /stream 예시 로드
+setResponseViewMode("merged");
+</script>
+</body>
+</html>

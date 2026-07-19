@@ -161,19 +161,24 @@
                 <div class="flex gap-1">
                     <button onclick="switchDebugTab('redis')" data-debug-tab="redis"
                             class="debug-tab-button px-2.5 py-1 rounded text-[11px] font-mono font-medium transition">REDIS</button>
+                    <button onclick="switchDebugTab('requests')" data-debug-tab="requests"
+                            class="debug-tab-button px-2.5 py-1 rounded text-[11px] font-medium transition">최근 요청</button>
                     <button onclick="switchDebugTab('info')" data-debug-tab="info"
                             class="debug-tab-button px-2.5 py-1 rounded text-[11px] font-medium transition">채팅방 정보</button>
                 </div>
                 <div class="flex items-center gap-2">
                     <span id="debug-refresh-status" class="text-[10px] text-slate-400 dark:text-slate-600 font-mono"></span>
+                    <button onclick="openApiClientWindow()" title="APIDog 스타일 API 테스트 페이지를 새 창으로 엽니다"
+                            class="px-2 py-1 rounded text-[10px] font-medium bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 transition">API 테스트 ↗</button>
                     <button id="info-csv-button" onclick="downloadRoomInfoCsv()"
                             class="hidden px-2 py-1 rounded text-[10px] font-medium bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition">CSV 저장</button>
                     <button onclick="toggleDebugPanelCollapsed()" id="debug-collapse-button" title="패널 접기"
                             class="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition text-[10px]">▼</button>
                 </div>
             </div>
-            <div id="debug-tab-redis" class="debug-tab-content chat-scroll flex-1 overflow-auto px-3 py-2 font-mono text-[11px] leading-relaxed"></div>
-            <div id="debug-tab-info"  class="debug-tab-content chat-scroll hidden flex-1 overflow-auto px-3 py-2"></div>
+            <div id="debug-tab-redis"    class="debug-tab-content chat-scroll flex-1 overflow-auto px-3 py-2 font-mono text-[11px] leading-relaxed"></div>
+            <div id="debug-tab-requests" class="debug-tab-content chat-scroll hidden flex-1 overflow-auto px-3 py-2 text-[11px]"></div>
+            <div id="debug-tab-info"     class="debug-tab-content chat-scroll hidden flex-1 overflow-auto px-3 py-2"></div>
         </section>
 
         <!-- 하단 입력 바 -->
@@ -491,8 +496,14 @@ function switchDebugTab(tabName) {
 
 function refreshDebugTabs() {
     if (!isDeveloperModeEnabled() || panelState.debugCollapsed) return;
-    if (panelState.debugTab === "redis") refreshRedisTabAsync();
-    else                                 renderRoomInfoTab();
+    if (panelState.debugTab === "redis")         refreshRedisTabAsync();
+    else if (panelState.debugTab === "requests") renderRequestLogTab();
+    else                                         renderRoomInfoTab();
+}
+
+function openApiClientWindow() {
+    // APIDog 스타일 API 테스트 페이지 : 백엔드가 직접 서빙(/dev/api-client)하므로 CORS 없이 same-origin 으로 통신한다
+    window.open(`${getApiUrl()}/dev/api-client`, "_blank");
 }
 
 function updateDebugPanelVisibility(isEnabled) {
@@ -576,6 +587,143 @@ function renderRedisTab(snapshot) {
         keyBlock.appendChild(keyHeader);
         keyBlock.appendChild(createJsonTreeElement(keySnapshot.value, "value", 0));
         redisContainer.appendChild(keyBlock);
+    }
+}
+
+/* ══════════════════ 최근 요청 탭 : 백엔드로 나가는 모든 fetch 를 자동 기록 ══════════════════ */
+
+const REQUEST_LOG_MAXIMUM_COUNT = 100;   // 메모리 보호용 보관 상한 (초과 시 오래된 항목부터 제거)
+
+let requestLogSequence        = 0;
+const requestLogList          = [];        // 최신 항목이 앞 : [{logId, requestedAt, method, url, headerDictionary, bodyText, statusCode, isOk, errorText, durationMs}]
+const expandedRequestLogIdSet = new Set(); // 펼쳐진 항목 유지 (재렌더링에도 접힘 상태 보존)
+
+// fetch 몽키패치 : 모든 API 호출(방 목록/스트림/모델/Redis 등)을 코드 수정 없이 자동 수집한다
+const nativeFetch = window.fetch.bind(window);
+window.fetch = async (input, init = {}) => {
+    const logEntry = {
+        logId            : ++requestLogSequence,
+        requestedAt      : new Date(),
+        method           : (init.method || "GET").toUpperCase(),
+        url              : typeof input === "string" ? input : input.url,
+        headerDictionary : { ...(init.headers || {}) },
+        bodyText         : typeof init.body === "string" ? init.body : null,
+        statusCode       : null,
+        isOk             : false,
+        errorText        : null,
+        durationMs       : null
+    };
+    const startedAt = performance.now();
+    try {
+        const response      = await nativeFetch(input, init);
+        logEntry.statusCode = response.status;
+        logEntry.isOk       = response.ok;
+        return response;
+    } catch (error) {
+        logEntry.errorText = String(error);
+        throw error;
+    } finally {
+        // 스트리밍 응답은 헤더 도착 시점까지의 시간이다 (본문 스트림 소요 시간은 채팅 메타라인 참고)
+        logEntry.durationMs = Math.round(performance.now() - startedAt);
+        requestLogList.unshift(logEntry);
+        if (requestLogList.length > REQUEST_LOG_MAXIMUM_COUNT) requestLogList.pop();
+        if (isDeveloperModeEnabled() && !panelState.debugCollapsed && panelState.debugTab === "requests") renderRequestLogTab();
+    }
+};
+
+function buildCurlCommand(logEntry) {
+    // 복사해서 터미널에 바로 실행 가능한 cURL 명령어를 생성한다 (bash 작은따옴표 이스케이프 포함)
+    const commandPartList = [`curl -X ${logEntry.method} "${logEntry.url}"`];
+    for (const [headerName, headerValue] of Object.entries(logEntry.headerDictionary)) commandPartList.push(`  -H "${headerName}: ${headerValue}"`);
+    if (logEntry.bodyText !== null) commandPartList.push(`  -d '${logEntry.bodyText.replaceAll("'", "'\\''")}'`);
+    return commandPartList.join(" \\\n");
+}
+
+async function copyTextToClipboard(copyText, copyButton) {
+    // 원클릭 복사 + 버튼 피드백 (클립보드 API 불가 환경은 임시 textarea 폴백)
+    try {
+        await navigator.clipboard.writeText(copyText);
+    } catch (_ignored) {
+        const fallbackTextarea = document.createElement("textarea");
+        fallbackTextarea.value = copyText;
+        document.body.appendChild(fallbackTextarea);
+        fallbackTextarea.select();
+        document.execCommand("copy");
+        fallbackTextarea.remove();
+    }
+    const originalLabel    = copyButton.textContent;
+    copyButton.textContent = "복사됨 ✓";
+    setTimeout(() => { copyButton.textContent = originalLabel; }, 1500);
+}
+
+function createRequestStatusBadge(logEntry) {
+    // 상태 코드 색상 배지 : 2xx 초록 / 3xx 앰버 / 4xx·5xx·네트워크 오류 빨강
+    const badgeText  = logEntry.errorText !== null ? "ERR" : String(logEntry.statusCode);
+    const toneClass  = logEntry.errorText !== null || logEntry.statusCode >= 400
+        ? "bg-red-100 text-red-700 border-red-300 dark:bg-red-950 dark:text-red-400 dark:border-red-800"
+        : logEntry.statusCode >= 300
+        ? "bg-amber-100 text-amber-700 border-amber-300 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800"
+        : "bg-emerald-100 text-emerald-700 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-800";
+    return createTextElement("span", badgeText, `shrink-0 px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold border ${toneClass}`);
+}
+
+function createRequestLogDetailSection(sectionTitle, contentText) {
+    // 펼침 상세의 한 섹션 : 제목 + 원클릭 복사 버튼 + 내용 블록
+    const section = document.createElement("div");
+    const titleRow = document.createElement("div");
+    titleRow.className = "flex items-center gap-2 mb-1";
+    titleRow.appendChild(createTextElement("span", sectionTitle, "text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider"));
+    const copyButton = document.createElement("button");
+    copyButton.className   = "px-1.5 py-0.5 rounded text-[10px] text-indigo-500 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 transition";
+    copyButton.textContent = "복사";
+    copyButton.onclick     = (event) => { event.stopPropagation(); copyTextToClipboard(contentText, copyButton); };
+    titleRow.appendChild(copyButton);
+    section.appendChild(titleRow);
+    const contentBlock = createTextElement("pre", contentText, "chat-scroll whitespace-pre-wrap break-all font-mono text-[10px] leading-relaxed bg-slate-100 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 rounded-lg px-2.5 py-2 max-h-40 overflow-y-auto text-slate-600 dark:text-slate-400");
+    section.appendChild(contentBlock);
+    return section;
+}
+
+function renderRequestLogTab() {
+    const requestContainer = document.getElementById("debug-tab-requests");
+    requestContainer.innerHTML = "";
+    requestContainer.appendChild(createTextElement("div", `최근 요청 ${requestLogList.length}건 (보관 상한 ${REQUEST_LOG_MAXIMUM_COUNT}건) · 행 클릭 시 Body / cURL / Header 표시`, "text-slate-400 dark:text-slate-500 mb-1.5 font-mono text-[10px]"));
+    if (requestLogList.length === 0) {
+        requestContainer.appendChild(createTextElement("div", "아직 기록된 API 요청이 없습니다. 메시지를 보내거나 방을 전환하면 여기에 쌓입니다.", "text-slate-400 dark:text-slate-600"));
+        return;
+    }
+    const methodColorMap = { GET : "text-emerald-600 dark:text-emerald-400", POST : "text-amber-600 dark:text-amber-400", DELETE : "text-red-600 dark:text-red-400", PUT : "text-sky-600 dark:text-sky-400", PATCH : "text-violet-600 dark:text-violet-400" };
+    for (const logEntry of requestLogList) {
+        const logRow = document.createElement("div");
+        logRow.className = "mb-1 rounded-lg border border-slate-200 dark:border-slate-800 overflow-hidden";
+
+        const headerRow = document.createElement("div");
+        headerRow.className = "flex items-center gap-2 px-2 py-1.5 cursor-pointer select-none hover:bg-slate-100 dark:hover:bg-slate-800/60 transition";
+        headerRow.onclick   = () => {
+            if (expandedRequestLogIdSet.has(logEntry.logId)) expandedRequestLogIdSet.delete(logEntry.logId);
+            else                                             expandedRequestLogIdSet.add(logEntry.logId);
+            renderRequestLogTab();
+        };
+        headerRow.appendChild(createTextElement("span", logEntry.requestedAt.toLocaleTimeString("ko-KR", { hour12 : false }), "shrink-0 font-mono text-[10px] text-slate-400 dark:text-slate-600"));
+        headerRow.appendChild(createTextElement("span", logEntry.method, `shrink-0 w-12 font-mono text-[10px] font-bold ${methodColorMap[logEntry.method] || ""}`));
+        headerRow.appendChild(createTextElement("span", logEntry.url.replace(getApiUrl(), ""), "flex-1 min-w-0 truncate font-mono text-[10px] text-slate-600 dark:text-slate-300"));
+        headerRow.appendChild(createRequestStatusBadge(logEntry));
+        headerRow.appendChild(createTextElement("span", `${logEntry.durationMs}ms`, "shrink-0 font-mono text-[10px] text-slate-400 dark:text-slate-600"));
+        logRow.appendChild(headerRow);
+
+        if (expandedRequestLogIdSet.has(logEntry.logId)) {
+            const detailContainer = document.createElement("div");
+            detailContainer.className = "px-2 pb-2 pt-1 space-y-2 border-t border-slate-100 dark:border-slate-800/60";
+            let prettyBodyText = logEntry.bodyText ?? "(없음)";
+            try { prettyBodyText = JSON.stringify(JSON.parse(logEntry.bodyText), null, 2); } catch (_ignored) {}
+            const headerLineText = Object.entries(logEntry.headerDictionary).map(([headerName, headerValue]) => `${headerName}: ${headerValue}`).join("\n") || "(없음)";
+            detailContainer.appendChild(createRequestLogDetailSection("Body",   prettyBodyText));
+            detailContainer.appendChild(createRequestLogDetailSection("cURL",   buildCurlCommand(logEntry)));
+            detailContainer.appendChild(createRequestLogDetailSection("Header", headerLineText));
+            if (logEntry.errorText !== null) detailContainer.appendChild(createTextElement("div", `네트워크 오류 : ${logEntry.errorText}`, "text-[10px] text-red-500 dark:text-red-400 font-mono"));
+            logRow.appendChild(detailContainer);
+        }
+        requestContainer.appendChild(logRow);
     }
 }
 

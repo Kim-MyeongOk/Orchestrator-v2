@@ -38,6 +38,7 @@ from typing             import Optional
 from fastapi                 import FastAPI
 from fastapi                 import HTTPException
 from fastapi.responses       import StreamingResponse
+from fastapi.responses       import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic                import BaseModel
 
@@ -195,6 +196,7 @@ class MonitorApplication:
         self.application.add_api_route("/rooms/{room_id}",             self.delete_room_async,        methods = ["DELETE"])
         self.application.add_api_route("/threads/{thread_id}/messages", self.get_thread_messages_async, methods = ["GET"])
         self.application.add_api_route("/redis/{thread_id}",           self.get_redis_snapshot_async,  methods = ["GET"])   # 디버그 패널용 Redis 캐시 조회
+        self.application.add_api_route("/dev/api-client",              self.get_api_client_page_async, methods = ["GET"], include_in_schema = False)   # APIDog 스타일 API 테스트 페이지 (디버그 패널 [API 테스트] 버튼)
         self.redis_client = None   # 지연 생성 (디버그 패널에서 처음 조회할 때 연결)
 
     def _get_or_create_compiled_graph(self, model_name : Optional[str], reasoning_effort : Optional[str] = None):
@@ -221,6 +223,23 @@ class MonitorApplication:
             raise HTTPException(status_code = 502, detail = f"OLLAMA MODEL LIST FAILED : {exception}")
         return {"default_model" : default_model, "models" : model_name_list, "provider" : model_provider}
 
+    @staticmethod
+    async def _apply_checkpoint_migrations_async(checkpoint_connection_pool) -> None:
+        # AsyncPostgresSaver.setup() 대체 : checkpoints 계열이 파티션 테이블인 환경에서는 setup() 의
+        # CREATE INDEX CONCURRENTLY 마이그레이션이 PostgreSQL 제약으로 크래시하므로, 미적용 마이그레이션만
+        # 일반 CREATE INDEX 로 치환해 순서대로 적용하고 적용 버전을 checkpoint_migrations 에 기록한다
+        from langgraph.checkpoint.postgres.base import MIGRATIONS
+        async with checkpoint_connection_pool.connection() as connection:
+            await connection.execute("CREATE TABLE IF NOT EXISTS checkpoint_migrations (v INTEGER PRIMARY KEY)")
+            cursor              = await connection.execute("SELECT v FROM checkpoint_migrations")
+            applied_version_set = {version_row["v"] for version_row in await cursor.fetchall()}
+            for migration_version, migration_sql in enumerate(MIGRATIONS):
+                if migration_version in applied_version_set:
+                    continue
+                await connection.execute(migration_sql.replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX"))
+                await connection.execute("INSERT INTO checkpoint_migrations (v) VALUES (%s) ON CONFLICT (v) DO NOTHING", (migration_version,))
+                print(f"CHECKPOINT MIGRATION APPLIED : VERSION {migration_version}", flush = True)
+
     @asynccontextmanager
     async def _lifespan_async(self, application : FastAPI) -> AsyncIterator[None]:
         # PostgreSQL 체크포인터 (메인 서버와 동일 테이블 공유 → 운영 스레드 진단 가능)
@@ -241,7 +260,8 @@ class MonitorApplication:
         self.checkpoint_connection_pool = AsyncConnectionPool(connection_info_text, min_size = 1, max_size = 3, open = False, kwargs = {"autocommit" : True, "row_factory" : dict_row})
         await self.checkpoint_connection_pool.open()
         checkpoint_saver = AsyncPostgresSaver(self.checkpoint_connection_pool)
-        await checkpoint_saver.setup()
+        # setup() 직접 호출 금지 : 파티션 테이블 환경에서 CONCURRENTLY 인덱스 마이그레이션이 크래시한다 (위 헬퍼로 동등 적용)
+        await MonitorApplication._apply_checkpoint_migrations_async(self.checkpoint_connection_pool)
 
         self.checkpoint_saver = checkpoint_saver
         self._get_or_create_compiled_graph(None)   # 기본 모델 그래프 선생성
@@ -290,6 +310,13 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
             if cursor.rowcount == 0:
                 raise HTTPException(status_code = 404, detail = f"ROOM NOT FOUND : {room_id}")
         return {"status" : "deleted"}
+
+    async def get_api_client_page_async(self) -> FileResponse:
+        # 새 창(/dev/api-client)으로 여는 API 테스트 페이지 : 백엔드가 직접 서빙하므로 origin = API 베이스 (CORS 불필요)
+        frontend_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "api_client.html")
+        if not os.path.isfile(frontend_file_path):
+            raise HTTPException(status_code = 404, detail = f"API CLIENT PAGE NOT FOUND : {frontend_file_path}")
+        return FileResponse(frontend_file_path, media_type = "text/html")
 
     async def get_redis_snapshot_async(self, thread_id : str) -> Dict[str, Any]:
         # 디버그 패널용 : 해당 스레드와 관련된 Redis 키를 실시간 스냅샷으로 반환한다

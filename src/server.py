@@ -8,14 +8,15 @@ import uvicorn
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-from dotenv        import load_dotenv
-from fastapi       import FastAPI
-from typing        import Optional
-from typing        import Dict
-from typing        import Any
-from contextlib    import asynccontextmanager
-from typing        import AsyncIterator
-from redis.asyncio import Redis
+from dotenv                  import load_dotenv
+from fastapi                 import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from typing                  import Optional
+from typing                  import Dict
+from typing                  import Any
+from contextlib              import asynccontextmanager
+from typing                  import AsyncIterator
+from redis.asyncio           import Redis
 
 from common.database.postgresql.postgresql_pool_manager        import PostgresqlPoolManager
 from common.cache.redis_stream.redis_stream_client             import RedisStreamClient
@@ -150,6 +151,8 @@ class ServerApplication:
         self.orchestrator_api_router      = OrchestratorAPIRouter(self.orchestrator_compiled_graph, self.uuid_v7_generator, self.chat_history_service, self.chunk_flush_service, self.graph_stream_executor, self.redis_chunk_buffer, self.is_checkpoint_enabled, self.image_attachment_interceptor)
 
         self.application = FastAPI(title = "LLM Job Service", lifespan = self.lifespan_async)
+        # 개발용 API 테스트 페이지(모니터 :8002 가 서빙하는 /dev/api-client)에서의 교차 출처 호출 허용
+        self.application.add_middleware(CORSMiddleware, allow_origins = ["*"], allow_methods = ["*"], allow_headers = ["*"], expose_headers = ["X-Run-Id", "X-Thread-Id"])
         self.application.include_router(self.llm_api_router.get_router())
         self.application.include_router(self.chat_api_router.get_router())
         self.application.include_router(self.orchestrator_api_router.get_router())
