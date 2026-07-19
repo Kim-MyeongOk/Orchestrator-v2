@@ -6,10 +6,13 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai                           import ChatOpenAI
 from langchain_anthropic                        import ChatAnthropic
 from langchain_ollama                           import ChatOllama
+from langchain_google_genai                     import ChatGoogleGenerativeAI
 
 from app.llm.agent.model_configuration import ModelConfiguration
 
 class ChatModelFactory:
+    # 생각 강도 → Gemini thinking_budget(토큰) 매핑
+    GOOGLE_THINKING_BUDGET_DICTIONARY = {"low" : 1024, "medium" : 8192, "high" : 24576}
     @staticmethod
     def _create_openai_compatible_model(model_configuration : ModelConfiguration, default_base_url : Optional[str] = None, default_api_key : Optional[str] = None) -> BaseChatModel:
         # 스트리밍 중 usage 수신을 위해 stream_usage를 켠다. vLLM/LM Studio 버전에 따라 usage가 없을 수 있으므로 소비 측은 usage 부재를 허용한다.
@@ -40,14 +43,33 @@ class ChatModelFactory:
                 timeout     = model_configuration.timeout_second_count,
                 max_retries = model_configuration.maximum_retry_count
             )
+        if provider == "google":
+            # thinking_budget : Gemini 2.5+ 의 생각 강도 제어 (0 이면 생각 끔, None 이면 모델 기본)
+            # include_thoughts : True 면 생각 요약이 응답에 포함되어 UI 로 스트리밍할 수 있다
+            thinking_budget = None
+            if model_configuration.reasoning_effort is not None:
+                thinking_budget = ChatModelFactory.GOOGLE_THINKING_BUDGET_DICTIONARY[model_configuration.reasoning_effort]
+            elif model_configuration.reasoning_enabled is False:
+                thinking_budget = 0
+            return ChatGoogleGenerativeAI(
+                model             = model_configuration.model_name,
+                google_api_key    = model_configuration.api_key,
+                temperature       = model_configuration.temperature,
+                max_output_tokens = model_configuration.maximum_token_count,
+                thinking_budget   = thinking_budget,
+                include_thoughts  = bool(model_configuration.reasoning_enabled),
+                timeout           = model_configuration.timeout_second_count,
+                max_retries       = model_configuration.maximum_retry_count
+            )
         if provider == "ollama":
-            # reasoning=False : qwen3 계열의 thinking 토큰 생성을 서버 측에서 차단한다
+            # reasoning : 생각 강도(low/medium/high, 모델이 지원할 때만 유효) > on/off(True/False) > 모델 기본(None) 순으로 적용
             # (thinking 이 켜져 있으면 짧은 답변에도 수천 토큰을 생성해 턴 지연이 분 단위로 커진다)
             return ChatOllama(
                 model                = model_configuration.model_name,
                 base_url             = model_configuration.base_url or "http://localhost:11434",
                 temperature          = model_configuration.temperature,
-                reasoning            = model_configuration.reasoning_enabled,
+                reasoning            = model_configuration.reasoning_effort or model_configuration.reasoning_enabled,
+                num_ctx              = model_configuration.context_token_count,
                 num_predict          = model_configuration.maximum_token_count,
                 client_kwargs        = {"timeout" : model_configuration.timeout_second_count},
                 sync_client_kwargs   = {"transport" : httpx.HTTPTransport(retries = model_configuration.maximum_retry_count)},

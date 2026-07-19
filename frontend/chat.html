@@ -1,0 +1,1220 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orchestrator Chat</title>
+<script>
+/* [FOUC 방지] DOM 렌더링 전에 저장된 테마(없으면 시스템 테마)를 html 태그에 주입한다.
+   이 스크립트는 반드시 스타일시트/본문보다 먼저 실행되어야 흰 화면 깜빡임이 없다. */
+(function () {
+    const storedTheme = localStorage.getItem("orchestrator_chat_theme");
+    const isDark      = storedTheme ? storedTheme === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    if (isDark) document.documentElement.classList.add("dark");
+})();
+</script>
+<style>
+    /* 첫 페인트용 크리티컬 배경 (Tailwind 로드 전에도 올바른 배경색 보장) */
+    html       { background : #f1f5f9; }
+    html.dark  { background : #020617; }
+</style>
+<!-- 빌드 도구 없이 즉시 동작 : Tailwind CDN (다크 모드는 class 제어) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config = { darkMode : "class" };</script>
+<style>
+    /* 테마 전환 시 배경·글자·테두리 색을 부드럽게 전환한다 */
+    body, body * { transition-property : background-color, border-color, color; transition-duration : 0.25s; transition-timing-function : ease; }
+
+    .chat-scroll::-webkit-scrollbar                 { width: 6px; }
+    .chat-scroll::-webkit-scrollbar-thumb           { background: #cbd5e1; border-radius: 3px; }
+    html.dark .chat-scroll::-webkit-scrollbar-thumb { background: #334155; }
+    .chat-scroll::-webkit-scrollbar-track           { background: transparent; }
+
+    @keyframes typing-blink { 0%, 100% { opacity: 0.2; } 50% { opacity: 1; } }
+    .typing-dot        { animation: typing-blink 1.2s infinite; }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes bubble-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    .bubble-enter { animation: bubble-in 0.18s ease-out; }
+
+    @keyframes toast-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
+    .toast-enter { animation: toast-in 0.2s ease-out; }
+</style>
+</head>
+<body class="bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100 h-screen overflow-hidden font-sans antialiased">
+
+<div class="h-full flex flex-col md:flex-row">
+
+    <!-- ══════════ 좌측 사이드바 : 채팅방 목록 + 세션 설정 (드래그 리사이즈 + 접기 지원) ══════════ -->
+    <aside id="sidebar" class="md:w-72 shrink-0 bg-white/80 dark:bg-slate-900/80 border-b md:border-b-0 md:border-r border-slate-200 dark:border-slate-800 flex flex-col max-h-64 md:max-h-none overflow-y-auto md:overflow-hidden">
+        <div class="sidebar-content p-4 md:p-5 pb-3 space-y-4">
+            <div class="flex items-center gap-2.5">
+                <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-sm font-bold text-white shadow-lg shadow-indigo-300 dark:shadow-indigo-950">O</div>
+                <div class="flex-1 min-w-0">
+                    <h1 class="text-sm font-semibold tracking-tight">Orchestrator Chat</h1>
+                    <p class="text-[10px] text-slate-500">LangGraph 체크포인트 대화</p>
+                </div>
+                <button onclick="toggleSidebarCollapsed()" title="사이드바 접기"
+                        class="hidden md:flex w-6 h-6 rounded items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-800 transition text-xs">◀</button>
+            </div>
+
+            <button onclick="createRoom()"
+                    class="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition shadow-lg shadow-indigo-200 dark:shadow-indigo-950/40">
+                ＋ 새 채팅방
+            </button>
+        </div>
+
+        <!-- 채팅방 목록 -->
+        <nav id="room-list" class="sidebar-content chat-scroll flex-1 overflow-y-auto px-3 space-y-1 min-h-0"></nav>
+
+        <!-- 접힌 상태 레일 : 펼치기 버튼만 노출 -->
+        <div class="sidebar-rail hidden flex-col items-center pt-4">
+            <button onclick="toggleSidebarCollapsed()" title="사이드바 펼치기"
+                    class="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-800 transition text-xs">▶</button>
+        </div>
+
+        <!-- 세션 설정 -->
+        <div class="sidebar-content p-4 md:p-5 pt-3 space-y-3 border-t border-slate-200 dark:border-slate-800/70">
+            <div>
+                <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">사용자 ID <span class="text-slate-400 dark:text-slate-600">(방 목록이 이 ID 로 저장됨)</span></label>
+                <input id="user-id" type="text" onchange="onUserIdChanged()"
+                       class="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+            </div>
+            <div>
+                <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">모델</label>
+                <select id="model-select" onchange="onModelChanged()"
+                        class="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+                    <option value="">(기본 모델)</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">생각 정도</label>
+                <select id="reasoning-effort-select" onchange="onReasoningEffortChanged()"
+                        class="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+                    <option value="">모델 기본</option>
+                    <option value="low">낮음 (빠른 응답)</option>
+                    <option value="medium">보통</option>
+                    <option value="high">높음 (깊은 사고)</option>
+                </select>
+            </div>
+            <!-- 개발자 모드 토글 : 켰을 때만 API URL / Thread ID 노출 -->
+            <div class="flex items-center justify-between">
+                <label class="text-[11px] font-medium text-slate-500 dark:text-slate-400 select-none cursor-pointer" for="developer-mode-toggle">개발자 모드</label>
+                <button id="developer-mode-toggle" onclick="toggleDeveloperMode()" role="switch" aria-checked="false"
+                        class="relative w-9 h-5 rounded-full bg-slate-300 dark:bg-slate-700 transition-colors">
+                    <span class="developer-toggle-knob absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform"></span>
+                </button>
+            </div>
+            <div id="developer-panel" class="hidden space-y-3">
+                <div>
+                    <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">백엔드 API URL</label>
+                    <input id="api-url" type="text" value="http://localhost:8002"
+                           class="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+                </div>
+                <div>
+                    <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">Thread ID <span class="text-slate-400 dark:text-slate-600">(현재 방)</span></label>
+                    <input id="thread-id" type="text" readonly
+                           class="w-full bg-slate-100 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-[10px] font-mono text-slate-500 focus:outline-none">
+                </div>
+            </div>
+            <button onclick="resetSession()"
+                    class="w-full py-2 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-300 transition">
+                현재 세션 초기화
+            </button>
+        </div>
+    </aside>
+
+    <!-- 사이드바 리사이즈 핸들 (데스크톱 전용, 드래그로 폭 조절) -->
+    <div id="sidebar-resize-handle" class="hidden md:block w-1.5 shrink-0 cursor-col-resize bg-slate-200 dark:bg-slate-800 hover:bg-indigo-400 dark:hover:bg-indigo-500 transition-colors"></div>
+
+    <!-- ══════════ 우측 메인 : 채팅 영역 ══════════ -->
+    <main class="flex-1 flex flex-col min-h-0 min-w-0">
+
+        <!-- 상단 바 -->
+        <header class="shrink-0 h-14 px-4 md:px-6 bg-white/70 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between backdrop-blur">
+            <div class="flex items-center gap-2 min-w-0">
+                <span id="header-room-title" class="text-xs font-medium text-slate-800 dark:text-slate-200 truncate max-w-[180px]">—</span>
+                <span class="text-slate-300 dark:text-slate-700">·</span>
+                <code id="header-thread-id" class="text-[11px] text-slate-500 font-mono truncate">—</code>
+                <span id="header-model" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400 shrink-0">기본 모델</span>
+            </div>
+            <div class="flex items-center gap-2.5 shrink-0">
+                <span id="status-dot" class="w-2 h-2 rounded-full bg-slate-400 dark:bg-slate-600"></span>
+                <span id="status-text" class="text-[11px] text-slate-500 dark:text-slate-400">대기</span>
+                <!-- 테마 토글 : 라이트 모드 = 해, 다크 모드 = 달 (아이콘 전환은 CSS dark: 변형으로 처리) -->
+                <button onclick="toggleTheme()" title="테마 전환"
+                        class="w-8 h-8 rounded-lg flex items-center justify-center text-amber-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition">
+                    <svg class="w-4.5 h-4.5 block dark:hidden w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.25a.75.75 0 0 1 .75.75v2.25a.75.75 0 0 1-1.5 0V3a.75.75 0 0 1 .75-.75ZM7.5 12a4.5 4.5 0 1 1 9 0 4.5 4.5 0 0 1-9 0ZM18.894 6.166a.75.75 0 0 0-1.06-1.06l-1.591 1.59a.75.75 0 1 0 1.06 1.061l1.591-1.59ZM21.75 12a.75.75 0 0 1-.75.75h-2.25a.75.75 0 0 1 0-1.5H21a.75.75 0 0 1 .75.75ZM17.834 18.894a.75.75 0 0 0 1.06-1.06l-1.59-1.591a.75.75 0 1 0-1.061 1.06l1.59 1.591ZM12 18a.75.75 0 0 1 .75.75V21a.75.75 0 0 1-1.5 0v-2.25A.75.75 0 0 1 12 18ZM7.758 17.303a.75.75 0 0 0-1.061-1.06l-1.591 1.59a.75.75 0 0 0 1.06 1.061l1.592-1.591ZM6 12a.75.75 0 0 1-.75.75H3a.75.75 0 0 1 0-1.5h2.25A.75.75 0 0 1 6 12ZM6.697 7.757a.75.75 0 0 0 1.06-1.06l-1.59-1.591a.75.75 0 0 0-1.061 1.06l1.59 1.591Z"/></svg>
+                    <svg class="hidden dark:block w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" d="M9.528 1.718a.75.75 0 0 1 .162.819A8.97 8.97 0 0 0 9 6a9 9 0 0 0 9 9 8.97 8.97 0 0 0 3.463-.69.75.75 0 0 1 .981.98 10.503 10.503 0 0 1-9.694 6.46c-5.799 0-10.5-4.7-10.5-10.5 0-4.368 2.667-8.112 6.46-9.694a.75.75 0 0 1 .818.162Z" clip-rule="evenodd"/></svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- 중앙 대화창 -->
+        <div id="message-feed" class="chat-scroll flex-1 overflow-y-auto px-4 md:px-6 py-5 space-y-4"></div>
+
+        <!-- ══ 디버그 패널 (개발자 모드 전용) : 상단 핸들 드래그로 높이 조절, 헤더 버튼으로 접기 ══ -->
+        <div id="debug-resize-handle" class="hidden h-1.5 shrink-0 cursor-row-resize bg-slate-200 dark:bg-slate-800 hover:bg-indigo-400 dark:hover:bg-indigo-500 transition-colors"></div>
+        <section id="debug-panel" class="hidden shrink-0 flex flex-col bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 min-h-0" style="height : 230px">
+            <div class="shrink-0 flex items-center justify-between px-3 py-1 border-b border-slate-200 dark:border-slate-800">
+                <div class="flex gap-1">
+                    <button onclick="switchDebugTab('redis')" data-debug-tab="redis"
+                            class="debug-tab-button px-2.5 py-1 rounded text-[11px] font-mono font-medium transition">REDIS</button>
+                    <button onclick="switchDebugTab('requests')" data-debug-tab="requests"
+                            class="debug-tab-button px-2.5 py-1 rounded text-[11px] font-medium transition">최근 요청</button>
+                    <button onclick="switchDebugTab('info')" data-debug-tab="info"
+                            class="debug-tab-button px-2.5 py-1 rounded text-[11px] font-medium transition">채팅방 정보</button>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span id="debug-refresh-status" class="text-[10px] text-slate-400 dark:text-slate-600 font-mono"></span>
+                    <button onclick="openApiClientWindow()" title="APIDog 스타일 API 테스트 페이지를 새 창으로 엽니다"
+                            class="px-2 py-1 rounded text-[10px] font-medium bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 transition">API 테스트 ↗</button>
+                    <button id="info-csv-button" onclick="downloadRoomInfoCsv()"
+                            class="hidden px-2 py-1 rounded text-[10px] font-medium bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition">CSV 저장</button>
+                    <button onclick="toggleDebugPanelCollapsed()" id="debug-collapse-button" title="패널 접기"
+                            class="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition text-[10px]">▼</button>
+                </div>
+            </div>
+            <div id="debug-tab-redis"    class="debug-tab-content chat-scroll flex-1 overflow-auto px-3 py-2 font-mono text-[11px] leading-relaxed"></div>
+            <div id="debug-tab-requests" class="debug-tab-content chat-scroll hidden flex-1 overflow-auto px-3 py-2 text-[11px]"></div>
+            <div id="debug-tab-info"     class="debug-tab-content chat-scroll hidden flex-1 overflow-auto px-3 py-2"></div>
+        </section>
+
+        <!-- 하단 입력 바 -->
+        <footer class="shrink-0 border-t border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60 backdrop-blur p-3 md:p-4">
+            <div class="max-w-3xl mx-auto flex items-end gap-2.5">
+                <textarea id="chat-input" rows="1" placeholder="메시지 입력…  (Enter 전송 · Shift+Enter 줄바꿈)"
+                          class="flex-1 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-3 text-sm resize-none max-h-40 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition placeholder:text-slate-400 dark:placeholder:text-slate-600"></textarea>
+                <button id="send-button" onclick="sendMessage()"
+                        class="shrink-0 w-11 h-11 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition shadow-lg shadow-indigo-200 dark:shadow-indigo-950/50">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5"><path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z"/></svg>
+                </button>
+            </div>
+        </footer>
+    </main>
+</div>
+
+<!-- 에러 토스트 컨테이너 -->
+<div id="toast-container" class="fixed bottom-5 right-5 z-50 space-y-2 w-80 max-w-[90vw]"></div>
+
+<!-- 세션 초기화 확인 모달 : 실수로 대화가 날아가는 것을 방지한다 -->
+<div id="confirm-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40 dark:bg-black/60 backdrop-blur-sm" onclick="if (event.target === this) closeResetConfirmModal()">
+    <div class="w-80 mx-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl p-5 bubble-enter">
+        <h2 class="text-sm font-semibold text-slate-800 dark:text-slate-100">현재 세션을 초기화할까요?</h2>
+        <p class="mt-2 text-xs leading-relaxed text-slate-500 dark:text-slate-400">이 방의 대화 내용이 모두 지워지고 새 Thread 가 발급됩니다. 이전 체크포인트 대화는 더 이상 이어지지 않습니다.</p>
+        <div class="mt-4 flex gap-2 justify-end">
+            <button onclick="closeResetConfirmModal()"
+                    class="px-3.5 py-2 rounded-lg text-xs font-medium bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition">취소</button>
+            <button onclick="confirmResetSession()"
+                    class="px-3.5 py-2 rounded-lg text-xs font-semibold bg-red-600 hover:bg-red-500 text-white transition">초기화</button>
+        </div>
+    </div>
+</div>
+
+<script>
+/* ══════════════════ 테마 (라이트/다크) ══════════════════ */
+
+const THEME_STORAGE_KEY = "orchestrator_chat_theme";
+
+function toggleTheme() {
+    const isDark = document.documentElement.classList.toggle("dark");
+    localStorage.setItem(THEME_STORAGE_KEY, isDark ? "dark" : "light");
+}
+
+// 시스템 테마 변경 실시간 반영 (사용자가 직접 고르기 전까지만)
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (event) => {
+    if (localStorage.getItem(THEME_STORAGE_KEY)) return;   // 명시적 선택이 있으면 시스템 변경 무시
+    document.documentElement.classList.toggle("dark", event.matches);
+});
+
+/* ══════════════════ 채팅방 상태 (localStorage 영속화) ══════════════════ */
+
+const ROOM_STORAGE_KEY = "orchestrator_chat_rooms_v1";
+
+let roomList      = [];     // [{roomId, threadId, title, model, reasoningEffort, messages: [{role, text, reasoning?, meta?}]}]
+let activeRoomId  = null;
+let isStreaming   = false;
+
+const messageFeed = document.getElementById("message-feed");
+const chatInput   = document.getElementById("chat-input");
+const sendButton  = document.getElementById("send-button");
+
+function getApiUrl() { return document.getElementById("api-url").value.trim().replace(/\/+$/, ""); }
+
+/* ── 사용자 ID : 방 목록이 서버에 이 ID 기준으로 저장된다 ── */
+
+const USER_ID_STORAGE_KEY = "orchestrator_chat_user_id";
+
+function getUserId() { return document.getElementById("user-id").value.trim() || "anonymous"; }
+
+function initializeUserId() {
+    const storedUserId = localStorage.getItem(USER_ID_STORAGE_KEY) || `user-${crypto.randomUUID().slice(0, 8)}`;
+    localStorage.setItem(USER_ID_STORAGE_KEY, storedUserId);
+    document.getElementById("user-id").value = storedUserId;
+}
+
+async function onUserIdChanged() {
+    // 사용자 ID 변경 : 해당 유저의 방 목록을 서버에서 다시 불러온다
+    if (isStreaming) return;
+    localStorage.setItem(USER_ID_STORAGE_KEY, getUserId());
+    await loadRoomsAsync();
+    renderRoomList();
+    renderActiveRoom();
+}
+
+/* ── 방 목록 : 서버(chat_room 테이블)가 원본, localStorage 는 오프라인 폴백 캐시 ── */
+
+function saveRooms() {
+    localStorage.setItem(ROOM_STORAGE_KEY, JSON.stringify({ roomList, activeRoomId, userId : getUserId() }));
+}
+
+async function syncRoomToServerAsync(room) {
+    // 방 메타(제목/모델/생각 정도/Thread) 를 서버에 upsert 한다 — 실패해도 로컬 동작은 계속 (다음 변경 때 재시도)
+    try {
+        await fetch(`${getApiUrl()}/rooms`, {
+            method  : "POST",
+            headers : { "Content-Type" : "application/json" },
+            body    : JSON.stringify({ user_id : getUserId(), room_id : room.roomId, thread_id : room.threadId, title : room.title, model : room.model || null, reasoning_effort : room.reasoningEffort || null })
+        });
+    } catch (_ignored) {}
+}
+
+async function loadRoomsAsync() {
+    // 서버에서 유저별 방 목록을 불러온다. 실패 시 localStorage 캐시(같은 유저일 때만)로 폴백.
+    let cachedState = null;
+    try { cachedState = JSON.parse(localStorage.getItem(ROOM_STORAGE_KEY)); } catch (_ignored) {}
+    try {
+        const response = await fetch(`${getApiUrl()}/rooms?user_id=${encodeURIComponent(getUserId())}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const serverRoomList = (await response.json()).rooms;
+        if (serverRoomList.length === 0 && Array.isArray(cachedState?.roomList) && cachedState.roomList.length > 0 && (cachedState.userId === undefined || cachedState.userId === getUserId())) {
+            // 최초 1회 마이그레이션 : 서버 도입 이전의 로컬 방 목록을 이 사용자 ID 로 서버에 등록한다
+            roomList = cachedState.roomList;
+            for (const localRoom of roomList) syncRoomToServerAsync(localRoom);
+        } else {
+            roomList = serverRoomList.map(serverRoom => {
+                // 로컬 캐시에 같은 방이 있으면 메시지/메타 캐시를 승계한다 (없으면 lazy 로드 대상 = null)
+                const cachedRoom = (cachedState?.userId === undefined || cachedState?.userId === getUserId()) ? cachedState?.roomList?.find(room => room.roomId === serverRoom.room_id) : null;
+                return { roomId : serverRoom.room_id, threadId : serverRoom.thread_id, title : serverRoom.title, model : serverRoom.model || "", reasoningEffort : serverRoom.reasoning_effort || "", messages : cachedRoom?.messages ?? null };
+            });
+        }
+    } catch (error) {
+        // 서버 불가 : 같은 유저의 로컬 캐시로 폴백 (없으면 빈 목록)
+        roomList = (cachedState?.userId === getUserId() && Array.isArray(cachedState.roomList)) ? cachedState.roomList : [];
+        showToast(`⚠ 방 목록 서버 연결 실패 (${error.message})\n로컬 캐시로 동작합니다.`);
+    }
+    if (roomList.length === 0) { createRoom(); return; }
+    activeRoomId = roomList.some(room => room.roomId === cachedState?.activeRoomId) ? cachedState.activeRoomId : roomList[0].roomId;
+    saveRooms();
+}
+
+function getActiveRoom() { return roomList.find(room => room.roomId === activeRoomId); }
+
+function createRoom() {
+    const room = { roomId : crypto.randomUUID(), threadId : crypto.randomUUID(), title : "새 대화", model : "", reasoningEffort : "", messages : [] };
+    roomList.unshift(room);
+    activeRoomId = room.roomId;
+    saveRooms();
+    syncRoomToServerAsync(room);
+    renderRoomList();
+    renderActiveRoom();
+}
+
+function switchRoom(roomId) {
+    if (isStreaming) return;   // 스트리밍 중 방 전환 방지 (응답이 다른 방에 섞이는 것을 막는다)
+    activeRoomId = roomId;
+    saveRooms();
+    renderRoomList();
+    renderActiveRoom();
+    refreshDebugTabs();   // 디버그 패널이 열려 있으면 새 방 기준으로 즉시 갱신
+}
+
+function deleteRoom(event, roomId) {
+    event.stopPropagation();
+    if (isStreaming) return;
+    roomList = roomList.filter(room => room.roomId !== roomId);
+    fetch(`${getApiUrl()}/rooms/${roomId}?user_id=${encodeURIComponent(getUserId())}`, { method : "DELETE" }).catch(() => {});
+    if (roomList.length === 0) { createRoom(); return; }
+    if (activeRoomId === roomId) activeRoomId = roomList[0].roomId;
+    saveRooms();
+    renderRoomList();
+    renderActiveRoom();
+}
+
+function resetSession() {
+    // 초기화 버튼 클릭 : 바로 지우지 않고 확인 모달을 띄운다 (실수 방지)
+    if (isStreaming) return;
+    document.getElementById("confirm-modal").classList.remove("hidden");
+}
+
+function closeResetConfirmModal() {
+    document.getElementById("confirm-modal").classList.add("hidden");
+}
+
+function confirmResetSession() {
+    // 모달에서 '초기화' 선택 시에만 실제 초기화 : 새 Thread 발급 (체크포인트와 분리) + 메시지 피드 초기화
+    closeResetConfirmModal();
+    const room = getActiveRoom();
+    room.threadId = crypto.randomUUID();
+    room.messages = [];
+    room.title    = "새 대화";
+    saveRooms();
+    syncRoomToServerAsync(room);
+    renderRoomList();
+    renderActiveRoom();
+    appendSystemNotice("새 세션이 시작되었습니다. 이전 체크포인트와 분리된 새 Thread 입니다.");
+}
+
+// ESC 로 확인 모달 닫기
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeResetConfirmModal();
+});
+
+/* ══════════════════ 개발자 모드 (API URL / Thread ID 노출 제어) ══════════════════ */
+
+const DEVELOPER_MODE_STORAGE_KEY = "orchestrator_chat_developer_mode";
+
+function applyDeveloperMode(isEnabled) {
+    document.getElementById("developer-panel").classList.toggle("hidden", !isEnabled);
+    const toggleSwitch = document.getElementById("developer-mode-toggle");
+    toggleSwitch.setAttribute("aria-checked", String(isEnabled));
+    toggleSwitch.classList.toggle("bg-indigo-600",      isEnabled);
+    toggleSwitch.classList.toggle("bg-slate-300",       !isEnabled);
+    toggleSwitch.classList.toggle("dark:bg-slate-700",  !isEnabled);   // 다크 변형이 인디고를 덮지 않게 함께 토글
+    toggleSwitch.querySelector(".developer-toggle-knob").style.transform = isEnabled ? "translateX(16px)" : "translateX(0)";
+    updateDebugPanelVisibility(isEnabled);   // 디버그 패널(하단)도 개발자 모드에 연동
+}
+
+function toggleDeveloperMode() {
+    const isEnabled = document.getElementById("developer-panel").classList.contains("hidden");   // 현재 숨김 → 켜기
+    localStorage.setItem(DEVELOPER_MODE_STORAGE_KEY, isEnabled ? "on" : "off");
+    applyDeveloperMode(isEnabled);
+}
+
+function isDeveloperModeEnabled() { return !document.getElementById("developer-panel").classList.contains("hidden"); }
+
+/* ══════════════════ 패널 레이아웃 : 리사이즈 + 접기 (상태 영속화) ══════════════════ */
+
+const PANEL_STATE_STORAGE_KEY = "orchestrator_chat_panel_state_v1";
+const panelState = { sidebarWidth : 288, sidebarCollapsed : false, debugHeight : 230, debugCollapsed : false, debugTab : "redis" };
+
+function loadPanelState() { try { Object.assign(panelState, JSON.parse(localStorage.getItem(PANEL_STATE_STORAGE_KEY)) || {}); } catch (_ignored) {} }
+function savePanelState() { localStorage.setItem(PANEL_STATE_STORAGE_KEY, JSON.stringify(panelState)); }
+
+function applySidebarState() {
+    const sidebar = document.getElementById("sidebar");
+    const rail    = sidebar.querySelector(".sidebar-rail");
+    if (!window.matchMedia("(min-width: 768px)").matches) {
+        // 모바일(세로 배치) : 데스크톱에서 남은 인라인 폭/접힘 상태를 반드시 해제해야 잘림이 없다
+        sidebar.style.width = "";
+        sidebar.querySelectorAll(".sidebar-content").forEach(sectionElement => sectionElement.classList.remove("hidden"));
+        rail.classList.add("hidden");
+        rail.classList.remove("flex");
+        return;
+    }
+    // 데스크톱 : 저장된 폭을 현재 창 크기에 맞게 클램프 (창을 줄였을 때 채팅 영역이 눌리지 않게)
+    const clampedWidth  = Math.min(panelState.sidebarWidth, Math.max(200, Math.floor(window.innerWidth * 0.4)));
+    sidebar.style.width = panelState.sidebarCollapsed ? "48px" : `${clampedWidth}px`;
+    sidebar.querySelectorAll(".sidebar-content").forEach(sectionElement => sectionElement.classList.toggle("hidden", panelState.sidebarCollapsed));
+    rail.classList.toggle("hidden", !panelState.sidebarCollapsed);
+    rail.classList.toggle("flex",   panelState.sidebarCollapsed);
+}
+
+function toggleSidebarCollapsed() {
+    panelState.sidebarCollapsed = !panelState.sidebarCollapsed;
+    savePanelState();
+    applySidebarState();
+}
+
+function applyDebugPanelState() {
+    const debugPanel    = document.getElementById("debug-panel");
+    // 저장된 높이를 현재 창 높이에 맞게 클램프 (좁은/낮은 창에서 채팅 영역이 사라지지 않게)
+    const clampedHeight = Math.min(panelState.debugHeight, Math.max(90, Math.floor(window.innerHeight * 0.6)));
+    debugPanel.style.height = panelState.debugCollapsed ? "34px" : `${clampedHeight}px`;
+    document.getElementById("debug-collapse-button").textContent = panelState.debugCollapsed ? "▲" : "▼";
+    document.querySelectorAll(".debug-tab-content").forEach(tabContent => {
+        const isActiveTab = tabContent.id === `debug-tab-${panelState.debugTab}`;
+        tabContent.classList.toggle("hidden", panelState.debugCollapsed || !isActiveTab);
+    });
+}
+
+function toggleDebugPanelCollapsed() {
+    panelState.debugCollapsed = !panelState.debugCollapsed;
+    savePanelState();
+    applyDebugPanelState();
+    if (!panelState.debugCollapsed) refreshDebugTabs();
+}
+
+// 창 크기 변경 시 패널 상태 재적용 : 좁아지면 모바일 레이아웃으로 복귀하고, 저장된 크기를 다시 클램프한다
+window.addEventListener("resize", () => {
+    applySidebarState();
+    if (isDeveloperModeEnabled()) applyDebugPanelState();
+});
+
+function initializePanelResizeHandles() {
+    // 사이드바 폭 드래그 (핸들 위치 = 좌측 기준 X 좌표)
+    document.getElementById("sidebar-resize-handle").addEventListener("mousedown", (event) => {
+        if (panelState.sidebarCollapsed) return;
+        event.preventDefault();
+        const onMouseMove = (moveEvent) => { panelState.sidebarWidth = Math.min(480, Math.max(200, moveEvent.clientX)); applySidebarState(); };
+        const onMouseUp   = () => { document.removeEventListener("mousemove", onMouseMove); document.removeEventListener("mouseup", onMouseUp); savePanelState(); };
+        document.addEventListener("mousemove", onMouseMove);
+        document.addEventListener("mouseup", onMouseUp);
+    });
+    // 디버그 패널 높이 드래그 (패널 하단 기준으로 계산)
+    document.getElementById("debug-resize-handle").addEventListener("mousedown", (event) => {
+        if (panelState.debugCollapsed) return;
+        event.preventDefault();
+        const debugPanel  = document.getElementById("debug-panel");
+        const onMouseMove = (moveEvent) => {
+            const panelBottom      = debugPanel.getBoundingClientRect().bottom;
+            panelState.debugHeight = Math.min(window.innerHeight * 0.6, Math.max(90, panelBottom - moveEvent.clientY));
+            applyDebugPanelState();
+        };
+        const onMouseUp = () => { document.removeEventListener("mousemove", onMouseMove); document.removeEventListener("mouseup", onMouseUp); savePanelState(); };
+        document.addEventListener("mousemove", onMouseMove);
+        document.addEventListener("mouseup", onMouseUp);
+    });
+}
+
+/* ══════════════════ 디버그 패널 : 탭 전환 ══════════════════ */
+
+function switchDebugTab(tabName) {
+    panelState.debugTab       = tabName;
+    panelState.debugCollapsed = false;   // 탭 클릭 시 접힘 자동 해제
+    savePanelState();
+    document.querySelectorAll(".debug-tab-button").forEach(tabButton => {
+        const isActive = tabButton.dataset.debugTab === tabName;
+        tabButton.className = `debug-tab-button px-2.5 py-1 rounded text-[11px] font-medium transition ${tabButton.dataset.debugTab === "redis" ? "font-mono " : ""}` +
+            (isActive ? "bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-100" : "text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300");
+    });
+    document.getElementById("info-csv-button").classList.toggle("hidden", tabName !== "info");
+    applyDebugPanelState();
+    refreshDebugTabs();
+}
+
+function refreshDebugTabs() {
+    if (!isDeveloperModeEnabled() || panelState.debugCollapsed) return;
+    if (panelState.debugTab === "redis")         refreshRedisTabAsync();
+    else if (panelState.debugTab === "requests") renderRequestLogTab();
+    else                                         renderRoomInfoTab();
+}
+
+function openApiClientWindow() {
+    // APIDog 스타일 API 테스트 페이지 : 백엔드가 직접 서빙(/dev/api-client)하므로 CORS 없이 same-origin 으로 통신한다
+    window.open(`${getApiUrl()}/dev/api-client`, "_blank");
+}
+
+function updateDebugPanelVisibility(isEnabled) {
+    document.getElementById("debug-resize-handle").classList.toggle("hidden", !isEnabled);
+    document.getElementById("debug-panel").classList.toggle("hidden", !isEnabled);
+    if (isEnabled) { switchDebugTab(panelState.debugTab); startRedisPolling(); }
+    else           { stopRedisPolling(); }
+}
+
+/* ══════════════════ REDIS 탭 : 트리 구조 JSON 실시간 시각화 (3초 폴링) ══════════════════ */
+
+let redisPollTimerId = null;
+
+function startRedisPolling() { stopRedisPolling(); redisPollTimerId = setInterval(refreshRedisTabAsync, 3000); }
+function stopRedisPolling()  { if (redisPollTimerId !== null) { clearInterval(redisPollTimerId); redisPollTimerId = null; } }
+
+async function refreshRedisTabAsync() {
+    if (!isDeveloperModeEnabled() || panelState.debugCollapsed || panelState.debugTab !== "redis") return;
+    const room = getActiveRoom();
+    if (!room) return;
+    const redisContainer = document.getElementById("debug-tab-redis");
+    try {
+        const response = await fetch(`${getApiUrl()}/redis/${encodeURIComponent(room.threadId)}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        renderRedisTab(await response.json());
+        document.getElementById("debug-refresh-status").textContent = `갱신 ${new Date().toLocaleTimeString("ko-KR", { hour12 : false })}`;
+    } catch (error) {
+        redisContainer.innerHTML = "";
+        redisContainer.appendChild(createTextElement("div", `Redis 조회 실패 : ${error.message}`, "text-red-500 dark:text-red-400"));
+    }
+}
+
+function createTextElement(tagName, text, className) {
+    const element = document.createElement(tagName);
+    element.textContent = text;
+    element.className   = className || "";
+    return element;
+}
+
+function createJsonTreeElement(value, keyLabel, depth) {
+    // JSON 값을 접이식 트리(<details>)로 재귀 렌더링한다
+    if (value !== null && typeof value === "object") {
+        const entryList = Object.entries(value);
+        const details   = document.createElement("details");
+        details.open    = depth < 1;
+        const summary   = document.createElement("summary");
+        summary.className = "cursor-pointer select-none hover:bg-slate-100 dark:hover:bg-slate-800 rounded px-0.5";
+        summary.appendChild(createTextElement("span", keyLabel, "text-sky-600 dark:text-sky-400"));
+        summary.appendChild(createTextElement("span", ` ${Array.isArray(value) ? `[${entryList.length}]` : `{${entryList.length}}`}`, "text-slate-400 dark:text-slate-600"));
+        details.appendChild(summary);
+        const childContainer = document.createElement("div");
+        childContainer.className = "pl-4 ml-1 border-l border-slate-200 dark:border-slate-800";
+        for (const [childKey, childValue] of entryList) childContainer.appendChild(createJsonTreeElement(childValue, childKey, depth + 1));
+        details.appendChild(childContainer);
+        return details;
+    }
+    const leaf       = document.createElement("div");
+    const valueClass = typeof value === "number" ? "text-amber-600 dark:text-amber-400"
+                     : (typeof value === "boolean" || value === null) ? "text-violet-600 dark:text-violet-400"
+                     : "text-emerald-700 dark:text-emerald-400";
+    leaf.appendChild(createTextElement("span", keyLabel, "text-sky-600 dark:text-sky-400"));
+    leaf.appendChild(createTextElement("span", " : ", "text-slate-400 dark:text-slate-600"));
+    leaf.appendChild(createTextElement("span", String(JSON.stringify(value)).slice(0, 300), valueClass));
+    return leaf;
+}
+
+function renderRedisTab(snapshot) {
+    const redisContainer = document.getElementById("debug-tab-redis");
+    redisContainer.innerHTML = "";
+    redisContainer.appendChild(createTextElement("div", `thread ${snapshot.thread_id} · 매칭 키 ${snapshot.matched_key_count}개`, "text-slate-400 dark:text-slate-500 mb-1.5"));
+    if (snapshot.keys.length === 0) {
+        redisContainer.appendChild(createTextElement("div", "이 스레드와 관련된 Redis 캐시 키가 없습니다. (오케스트레이터 청크 버퍼는 스트리밍 중에만 존재하고 flush 후 삭제됩니다)", "text-slate-400 dark:text-slate-600"));
+        return;
+    }
+    for (const keySnapshot of snapshot.keys) {
+        const keyBlock = document.createElement("div");
+        keyBlock.className = "mb-2 pb-2 border-b border-slate-100 dark:border-slate-800/60";
+        const keyHeader = document.createElement("div");
+        keyHeader.appendChild(createTextElement("span", keySnapshot.key, "text-indigo-600 dark:text-indigo-400 font-semibold break-all"));
+        keyHeader.appendChild(createTextElement("span", `  (${keySnapshot.type} · ${keySnapshot.length ?? "?"}개 · TTL ${keySnapshot.ttl_second}s)`, "text-slate-400 dark:text-slate-600"));
+        keyBlock.appendChild(keyHeader);
+        keyBlock.appendChild(createJsonTreeElement(keySnapshot.value, "value", 0));
+        redisContainer.appendChild(keyBlock);
+    }
+}
+
+/* ══════════════════ 최근 요청 탭 : 백엔드로 나가는 모든 fetch 를 자동 기록 ══════════════════ */
+
+const REQUEST_LOG_MAXIMUM_COUNT = 100;   // 메모리 보호용 보관 상한 (초과 시 오래된 항목부터 제거)
+
+let requestLogSequence        = 0;
+const requestLogList          = [];        // 최신 항목이 앞 : [{logId, requestedAt, method, url, headerDictionary, bodyText, statusCode, isOk, errorText, durationMs}]
+const expandedRequestLogIdSet = new Set(); // 펼쳐진 항목 유지 (재렌더링에도 접힘 상태 보존)
+
+// fetch 몽키패치 : 모든 API 호출(방 목록/스트림/모델/Redis 등)을 코드 수정 없이 자동 수집한다
+const nativeFetch = window.fetch.bind(window);
+window.fetch = async (input, init = {}) => {
+    const logEntry = {
+        logId            : ++requestLogSequence,
+        requestedAt      : new Date(),
+        method           : (init.method || "GET").toUpperCase(),
+        url              : typeof input === "string" ? input : input.url,
+        headerDictionary : { ...(init.headers || {}) },
+        bodyText         : typeof init.body === "string" ? init.body : null,
+        statusCode       : null,
+        isOk             : false,
+        errorText        : null,
+        durationMs       : null
+    };
+    const startedAt = performance.now();
+    try {
+        const response      = await nativeFetch(input, init);
+        logEntry.statusCode = response.status;
+        logEntry.isOk       = response.ok;
+        return response;
+    } catch (error) {
+        logEntry.errorText = String(error);
+        throw error;
+    } finally {
+        // 스트리밍 응답은 헤더 도착 시점까지의 시간이다 (본문 스트림 소요 시간은 채팅 메타라인 참고)
+        logEntry.durationMs = Math.round(performance.now() - startedAt);
+        requestLogList.unshift(logEntry);
+        if (requestLogList.length > REQUEST_LOG_MAXIMUM_COUNT) requestLogList.pop();
+        if (isDeveloperModeEnabled() && !panelState.debugCollapsed && panelState.debugTab === "requests") renderRequestLogTab();
+    }
+};
+
+function buildCurlCommand(logEntry) {
+    // 복사해서 터미널에 바로 실행 가능한 cURL 명령어를 생성한다 (bash 작은따옴표 이스케이프 포함)
+    const commandPartList = [`curl -X ${logEntry.method} "${logEntry.url}"`];
+    for (const [headerName, headerValue] of Object.entries(logEntry.headerDictionary)) commandPartList.push(`  -H "${headerName}: ${headerValue}"`);
+    if (logEntry.bodyText !== null) commandPartList.push(`  -d '${logEntry.bodyText.replaceAll("'", "'\\''")}'`);
+    return commandPartList.join(" \\\n");
+}
+
+async function copyTextToClipboard(copyText, copyButton) {
+    // 원클릭 복사 + 버튼 피드백 (클립보드 API 불가 환경은 임시 textarea 폴백)
+    try {
+        await navigator.clipboard.writeText(copyText);
+    } catch (_ignored) {
+        const fallbackTextarea = document.createElement("textarea");
+        fallbackTextarea.value = copyText;
+        document.body.appendChild(fallbackTextarea);
+        fallbackTextarea.select();
+        document.execCommand("copy");
+        fallbackTextarea.remove();
+    }
+    const originalLabel    = copyButton.textContent;
+    copyButton.textContent = "복사됨 ✓";
+    setTimeout(() => { copyButton.textContent = originalLabel; }, 1500);
+}
+
+function createRequestStatusBadge(logEntry) {
+    // 상태 코드 색상 배지 : 2xx 초록 / 3xx 앰버 / 4xx·5xx·네트워크 오류 빨강
+    const badgeText  = logEntry.errorText !== null ? "ERR" : String(logEntry.statusCode);
+    const toneClass  = logEntry.errorText !== null || logEntry.statusCode >= 400
+        ? "bg-red-100 text-red-700 border-red-300 dark:bg-red-950 dark:text-red-400 dark:border-red-800"
+        : logEntry.statusCode >= 300
+        ? "bg-amber-100 text-amber-700 border-amber-300 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800"
+        : "bg-emerald-100 text-emerald-700 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-800";
+    return createTextElement("span", badgeText, `shrink-0 px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold border ${toneClass}`);
+}
+
+function createRequestLogDetailSection(sectionTitle, contentText) {
+    // 펼침 상세의 한 섹션 : 제목 + 원클릭 복사 버튼 + 내용 블록
+    const section = document.createElement("div");
+    const titleRow = document.createElement("div");
+    titleRow.className = "flex items-center gap-2 mb-1";
+    titleRow.appendChild(createTextElement("span", sectionTitle, "text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider"));
+    const copyButton = document.createElement("button");
+    copyButton.className   = "px-1.5 py-0.5 rounded text-[10px] text-indigo-500 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 transition";
+    copyButton.textContent = "복사";
+    copyButton.onclick     = (event) => { event.stopPropagation(); copyTextToClipboard(contentText, copyButton); };
+    titleRow.appendChild(copyButton);
+    section.appendChild(titleRow);
+    const contentBlock = createTextElement("pre", contentText, "chat-scroll whitespace-pre-wrap break-all font-mono text-[10px] leading-relaxed bg-slate-100 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 rounded-lg px-2.5 py-2 max-h-40 overflow-y-auto text-slate-600 dark:text-slate-400");
+    section.appendChild(contentBlock);
+    return section;
+}
+
+function renderRequestLogTab() {
+    const requestContainer = document.getElementById("debug-tab-requests");
+    requestContainer.innerHTML = "";
+    requestContainer.appendChild(createTextElement("div", `최근 요청 ${requestLogList.length}건 (보관 상한 ${REQUEST_LOG_MAXIMUM_COUNT}건) · 행 클릭 시 Body / cURL / Header 표시`, "text-slate-400 dark:text-slate-500 mb-1.5 font-mono text-[10px]"));
+    if (requestLogList.length === 0) {
+        requestContainer.appendChild(createTextElement("div", "아직 기록된 API 요청이 없습니다. 메시지를 보내거나 방을 전환하면 여기에 쌓입니다.", "text-slate-400 dark:text-slate-600"));
+        return;
+    }
+    const methodColorMap = { GET : "text-emerald-600 dark:text-emerald-400", POST : "text-amber-600 dark:text-amber-400", DELETE : "text-red-600 dark:text-red-400", PUT : "text-sky-600 dark:text-sky-400", PATCH : "text-violet-600 dark:text-violet-400" };
+    for (const logEntry of requestLogList) {
+        const logRow = document.createElement("div");
+        logRow.className = "mb-1 rounded-lg border border-slate-200 dark:border-slate-800 overflow-hidden";
+
+        const headerRow = document.createElement("div");
+        headerRow.className = "flex items-center gap-2 px-2 py-1.5 cursor-pointer select-none hover:bg-slate-100 dark:hover:bg-slate-800/60 transition";
+        headerRow.onclick   = () => {
+            if (expandedRequestLogIdSet.has(logEntry.logId)) expandedRequestLogIdSet.delete(logEntry.logId);
+            else                                             expandedRequestLogIdSet.add(logEntry.logId);
+            renderRequestLogTab();
+        };
+        headerRow.appendChild(createTextElement("span", logEntry.requestedAt.toLocaleTimeString("ko-KR", { hour12 : false }), "shrink-0 font-mono text-[10px] text-slate-400 dark:text-slate-600"));
+        headerRow.appendChild(createTextElement("span", logEntry.method, `shrink-0 w-12 font-mono text-[10px] font-bold ${methodColorMap[logEntry.method] || ""}`));
+        headerRow.appendChild(createTextElement("span", logEntry.url.replace(getApiUrl(), ""), "flex-1 min-w-0 truncate font-mono text-[10px] text-slate-600 dark:text-slate-300"));
+        headerRow.appendChild(createRequestStatusBadge(logEntry));
+        headerRow.appendChild(createTextElement("span", `${logEntry.durationMs}ms`, "shrink-0 font-mono text-[10px] text-slate-400 dark:text-slate-600"));
+        logRow.appendChild(headerRow);
+
+        if (expandedRequestLogIdSet.has(logEntry.logId)) {
+            const detailContainer = document.createElement("div");
+            detailContainer.className = "px-2 pb-2 pt-1 space-y-2 border-t border-slate-100 dark:border-slate-800/60";
+            let prettyBodyText = logEntry.bodyText ?? "(없음)";
+            try { prettyBodyText = JSON.stringify(JSON.parse(logEntry.bodyText), null, 2); } catch (_ignored) {}
+            const headerLineText = Object.entries(logEntry.headerDictionary).map(([headerName, headerValue]) => `${headerName}: ${headerValue}`).join("\n") || "(없음)";
+            detailContainer.appendChild(createRequestLogDetailSection("Body",   prettyBodyText));
+            detailContainer.appendChild(createRequestLogDetailSection("cURL",   buildCurlCommand(logEntry)));
+            detailContainer.appendChild(createRequestLogDetailSection("Header", headerLineText));
+            if (logEntry.errorText !== null) detailContainer.appendChild(createTextElement("div", `네트워크 오류 : ${logEntry.errorText}`, "text-[10px] text-red-500 dark:text-red-400 font-mono"));
+            logRow.appendChild(detailContainer);
+        }
+        requestContainer.appendChild(logRow);
+    }
+}
+
+/* ══════════════════ 채팅방 정보 탭 : 메타데이터 테이블 + CSV 저장 ══════════════════ */
+
+function collectRoomInfoRows() {
+    // CSV/테이블 공용 데이터 (Run ID 는 오케스트레이터(8000) 잡 파이프라인 전용 개념이라 이 채팅 스트림에서는 미발급)
+    return roomList.map(room => ({
+        "제목"      : room.title,
+        "Room ID"   : room.roomId,
+        "Thread ID" : room.threadId,
+        "Run ID"    : "— (미발급)",
+        "모델"      : room.model || "(기본)",
+        "생각 정도" : room.reasoningEffort || "(기본)",
+        "메시지 수" : room.messages === null ? "(미로드)" : room.messages.length,
+        "활성"      : room.roomId === activeRoomId ? "●" : ""
+    }));
+}
+
+function renderRoomInfoTab() {
+    const infoContainer = document.getElementById("debug-tab-info");
+    infoContainer.innerHTML = "";
+    const summaryLine = document.createElement("div");
+    summaryLine.className = "mb-2 text-[11px] text-slate-500 dark:text-slate-400 font-mono";
+    summaryLine.textContent = `User ID : ${getUserId()}   ·   API : ${getApiUrl()}   ·   방 ${roomList.length}개`;
+    infoContainer.appendChild(summaryLine);
+
+    const infoRowList = collectRoomInfoRows();
+    const table = document.createElement("table");
+    table.className = "w-full text-[11px] border-collapse";
+    const headerRow = document.createElement("tr");
+    for (const columnName of Object.keys(infoRowList[0] || { "제목" : "" })) {
+        const th = createTextElement("th", columnName, "text-left px-2 py-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-medium border border-slate-200 dark:border-slate-700 whitespace-nowrap");
+        headerRow.appendChild(th);
+    }
+    table.appendChild(headerRow);
+    for (const infoRow of infoRowList) {
+        const bodyRow = document.createElement("tr");
+        for (const cellValue of Object.values(infoRow)) {
+            const td = createTextElement("td", String(cellValue), "px-2 py-1 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 font-mono break-all");
+            bodyRow.appendChild(td);
+        }
+        table.appendChild(bodyRow);
+    }
+    infoContainer.appendChild(table);
+}
+
+function downloadRoomInfoCsv() {
+    const infoRowList = collectRoomInfoRows();
+    const csvRowList  = [
+        ["User ID", getUserId()], ["내보낸 시각", new Date().toISOString()], [],
+        Object.keys(infoRowList[0] || {}),
+        ...infoRowList.map(infoRow => Object.values(infoRow))
+    ];
+    const escapeCsvCell = (cellValue) => `"${String(cellValue).replaceAll('"', '""')}"`;
+    const csvText = "﻿" + csvRowList.map(csvRow => csvRow.map(escapeCsvCell).join(",")).join("\r\n");   // BOM : 엑셀 한글 호환
+    const downloadLink    = document.createElement("a");
+    downloadLink.href     = URL.createObjectURL(new Blob([csvText], { type : "text/csv;charset=utf-8" }));
+    downloadLink.download = `chat_rooms_${getUserId()}_${new Date().toISOString().slice(0, 10)}.csv`;
+    downloadLink.click();
+    URL.revokeObjectURL(downloadLink.href);
+}
+
+/* ══════════════════ 렌더링 ══════════════════ */
+
+function renderRoomList() {
+    const roomListElement = document.getElementById("room-list");
+    roomListElement.innerHTML = "";
+    for (const room of roomList) {
+        const isActive = room.roomId === activeRoomId;
+        const item = document.createElement("div");
+        item.className = `group flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition text-xs ${isActive ? "bg-slate-200 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100" : "text-slate-600 dark:text-slate-400 hover:bg-slate-200/70 dark:hover:bg-slate-800/60 border border-transparent"}`;
+        item.onclick   = () => switchRoom(room.roomId);
+
+        const title = document.createElement("span");
+        title.className   = "flex-1 truncate";
+        title.textContent = room.title;
+
+        const modelTag = document.createElement("span");
+        modelTag.className   = "text-[9px] text-slate-400 dark:text-slate-600 shrink-0";
+        modelTag.textContent = room.model ? room.model.split(":")[0] : "";
+
+        const deleteButton = document.createElement("button");
+        deleteButton.className   = "shrink-0 w-5 h-5 rounded flex items-center justify-center text-slate-400 dark:text-slate-600 hover:text-red-500 dark:hover:text-red-400 hover:bg-slate-300/60 dark:hover:bg-slate-700/60 opacity-0 group-hover:opacity-100 transition";
+        deleteButton.textContent = "✕";
+        deleteButton.title       = "채팅방 삭제";
+        deleteButton.onclick     = (event) => deleteRoom(event, room.roomId);
+
+        item.append(title, modelTag, deleteButton);
+        roomListElement.appendChild(item);
+    }
+}
+
+function renderActiveRoom() {
+    const room = getActiveRoom();
+    document.getElementById("thread-id").value              = room.threadId;
+    document.getElementById("header-thread-id").textContent = room.threadId.slice(0, 13) + "…";
+    document.getElementById("header-room-title").textContent = room.title;
+    document.getElementById("header-model").textContent      = room.model || "기본 모델";
+    document.getElementById("model-select").value            = room.model;
+    document.getElementById("reasoning-effort-select").value = room.reasoningEffort || "";
+    setStatus("대기", "bg-slate-400 dark:bg-slate-600");
+
+    messageFeed.innerHTML = "";
+    if (room.messages === null) {
+        // 다른 기기/재접속으로 로컬 캐시가 없는 방 : 서버(LangGraph 체크포인트)에서 대화를 복원한다
+        messageFeed.innerHTML = `<div class="text-center pt-10 text-slate-400 dark:text-slate-600 text-sm">대화 내용을 불러오는 중…</div>`;
+        restoreRoomMessagesAsync(room);
+        return;
+    }
+    if (room.messages.length === 0) {
+        messageFeed.innerHTML = `<div class="text-center pt-10">
+            <p class="text-slate-400 dark:text-slate-600 text-sm">메시지를 보내 오케스트레이터와 대화를 시작하세요.</p>
+            <p class="text-slate-400/80 dark:text-slate-700 text-[11px] mt-1.5">백엔드 : <code class="font-mono">python src/think_bottleneck_monitor.py</code> (포트 8002)</p></div>`;
+        return;
+    }
+    for (const storedMessage of room.messages) {
+        if (storedMessage.role === "user")       appendUserBubble(storedMessage.text, false);
+        else if (storedMessage.role === "error") appendAgentBubble().markError(storedMessage.text);
+        else                                     { const bubble = appendAgentBubble(); bubble.setStoredReasoning(storedMessage.reasoning); bubble.appendText(storedMessage.text); bubble.finalize(); bubble.setStoredMeta(storedMessage.meta); }
+    }
+    scrollFeedToBottom();
+}
+
+async function restoreRoomMessagesAsync(room) {
+    // 체크포인트 → 표시용 메시지 복원 : 완료 후 해당 방이 여전히 활성 상태면 다시 렌더링한다
+    try {
+        const response = await fetch(`${getApiUrl()}/threads/${encodeURIComponent(room.threadId)}/messages`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        room.messages = (await response.json()).messages.map(serverMessage => ({ role : serverMessage.role, text : serverMessage.text, reasoning : serverMessage.reasoning || "" }));
+    } catch (error) {
+        room.messages = [];
+        showToast(`⚠ 대화 복원 실패 (${error.message}) — 빈 대화로 시작합니다.`);
+    }
+    saveRooms();
+    if (activeRoomId === room.roomId) renderActiveRoom();
+}
+
+function onModelChanged() {
+    const room = getActiveRoom();
+    room.model = document.getElementById("model-select").value;
+    document.getElementById("header-model").textContent = room.model || "기본 모델";
+    saveRooms();
+    syncRoomToServerAsync(room);
+    renderRoomList();
+}
+
+function onReasoningEffortChanged() {
+    // 생각 강도 : google → thinking_budget(low 1024/medium 8192/high 24576), ollama → think 레벨(지원 모델 한정)
+    const room = getActiveRoom();
+    room.reasoningEffort = document.getElementById("reasoning-effort-select").value;
+    saveRooms();
+    syncRoomToServerAsync(room);
+}
+
+async function loadModelOptions(attemptCount = 0) {
+    // 백엔드 GET /models 로 모델 목록을 드롭다운에 채운다.
+    // 백엔드보다 페이지를 먼저 연 경우를 위해 스트림과 동일한 지수 백오프(1초→2초→4초, 최대 3회)로 재시도한다
+    const apiUrl = document.getElementById("api-url").value.trim().replace(/\/+$/, "");
+    try {
+        const response = await fetch(`${apiUrl}/models`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result      = await response.json();
+        const modelSelect = document.getElementById("model-select");
+        modelSelect.innerHTML = `<option value="">(기본 : ${result.default_model})</option>`;
+        for (const modelName of result.models) {
+            const option = document.createElement("option");
+            option.value = modelName;
+            option.textContent = modelName;
+            modelSelect.appendChild(option);
+        }
+        // 백엔드 프로바이더가 바뀌면 방에 저장된 이전 모델이 무효가 된다 → 기본 모델로 자동 초기화
+        const validModelSet   = new Set(result.models);
+        let   isRoomListDirty = false;
+        for (const room of roomList) {
+            if (room.model && !validModelSet.has(room.model)) { room.model = ""; isRoomListDirty = true; }
+        }
+        if (isRoomListDirty) { saveRooms(); renderRoomList(); document.getElementById("header-model").textContent = getActiveRoom()?.model || "기본 모델"; }
+        modelSelect.value = getActiveRoom()?.model || "";
+    } catch (error) {
+        if (attemptCount < STREAM_MAX_RETRY_COUNT) {
+            const backoffDelayMs = STREAM_BASE_DELAY_MS * 2 ** attemptCount;   // 1초 → 2초 → 4초
+            setTimeout(() => loadModelOptions(attemptCount + 1), backoffDelayMs);
+            return;
+        }
+        showToast(`⚠ 모델 목록 로드 실패 (${error.message})\n기본 모델로 동작합니다. 백엔드 확인 후 새로고침하세요.`);
+        appendSystemNotice(`모델 목록 로드 실패 (${error.message}) — 기본 모델로 동작합니다.`);
+    }
+}
+
+/* ══════════════════ 토스트 알림 ══════════════════ */
+
+function showToast(text, toneClass = "bg-red-600/95") {
+    const toast = document.createElement("div");
+    toast.className   = `toast-enter ${toneClass} text-white text-xs leading-relaxed rounded-lg px-4 py-3 shadow-xl`;
+    toast.textContent = text;
+    document.getElementById("toast-container").appendChild(toast);
+    setTimeout(() => { toast.style.opacity = "0"; setTimeout(() => toast.remove(), 300); }, 6000);
+}
+
+/* ══════════════════ 말풍선 렌더링 ══════════════════ */
+
+function setStatus(text, colorClass) {
+    document.getElementById("status-text").textContent = text;
+    document.getElementById("status-dot").className    = `w-2 h-2 rounded-full ${colorClass}`;
+}
+
+function scrollFeedToBottom() { messageFeed.scrollTop = messageFeed.scrollHeight; }
+
+function appendSystemNotice(text) {
+    const notice = document.createElement("div");
+    notice.className   = "text-center text-[11px] text-slate-400 dark:text-slate-600 py-1";
+    notice.textContent = text;
+    messageFeed.appendChild(notice);
+    scrollFeedToBottom();
+}
+
+function appendUserBubble(text, animate = true) {
+    const row = document.createElement("div");
+    row.className = "flex justify-end" + (animate ? " bubble-enter" : "");
+    row.innerHTML = `<div class="max-w-[78%] md:max-w-[65%] bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow"></div>`;
+    row.firstElementChild.textContent = text;
+    messageFeed.appendChild(row);
+    scrollFeedToBottom();
+}
+
+function appendAgentBubble() {
+    // 스트리밍 누적용 말풍선 : 첫 토큰 전에는 타이핑 인디케이터, 생각 과정은 접이식 섹션에 실시간 표시.
+    // 말풍선 아래 메타라인에 경과 시간·토큰 수를 라이브로 갱신한다 (Ollama 는 청크당 1토큰 스트리밍 → 이벤트 수 = 토큰 수)
+    const row = document.createElement("div");
+    row.className = "flex justify-start bubble-enter";
+    // 주의 : 답변 영역은 whitespace-pre-wrap 이므로 태그 사이에 개행/들여쓰기를 넣으면 여백으로 렌더링된다
+    row.innerHTML = `<div class="flex flex-col items-start max-w-[78%] md:max-w-[65%]"><div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700/60 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed shadow w-fit min-w-0"><details class="reasoning-details hidden mb-1.5 -mx-1"><summary class="cursor-pointer select-none text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition px-1">&#129300; 생각 과정 <span class="reasoning-status text-slate-400 dark:text-slate-600"></span></summary><div class="reasoning-text chat-scroll whitespace-pre-wrap text-[11px] leading-relaxed text-slate-500 bg-slate-100 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg px-2.5 py-2 mt-1 max-h-36 overflow-y-auto"></div></details><span class="typing-indicator inline-flex gap-1 items-center py-1"><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span></span><span class="retry-notice hidden text-[11px] text-amber-600 dark:text-amber-400 italic"></span><span class="agent-text whitespace-pre-wrap"></span></div><div class="meta-line hidden text-[10px] text-slate-500 dark:text-slate-600 mt-1 px-1 font-mono"></div></div>`;
+    messageFeed.appendChild(row);
+    scrollFeedToBottom();
+    const reasoningDetails = row.querySelector(".reasoning-details");
+    const reasoningText    = row.querySelector(".reasoning-text");
+    const metaLine         = row.querySelector(".meta-line");
+    const retryNotice      = row.querySelector(".retry-notice");
+
+    // 라이브 메타 상태 (경과 시간 타이머 + 토큰 카운터)
+    let liveStartedAt        = null;
+    let liveTimerId          = null;
+    let reasoningTokenCount  = 0;
+    let answerTokenCount     = 0;
+
+    const formatElapsedSeconds = () => liveStartedAt === null ? "0.0" : ((performance.now() - liveStartedAt) / 1000).toFixed(1);
+    const renderMetaLine = () => {
+        metaLine.classList.remove("hidden");
+        metaLine.textContent = `⏱ ${formatElapsedSeconds()}s · 생각 ${reasoningTokenCount} 토큰 · 응답 ${answerTokenCount} 토큰`;
+        if (!reasoningDetails.classList.contains("hidden") && reasoningDetails.open) {
+            row.querySelector(".reasoning-status").textContent = `(생각 중… ${formatElapsedSeconds()}s · ${reasoningTokenCount} 토큰)`;
+        }
+    };
+    const clearRetryNotice = () => { retryNotice.classList.add("hidden"); retryNotice.textContent = ""; };
+
+    return {
+        startLiveMeta : () => {
+            // 전송 직후 호출 : 0.1초 간격으로 경과 시간을 갱신한다 (클로드식 실시간 카운터)
+            liveStartedAt = performance.now();
+            liveTimerId   = setInterval(renderMetaLine, 100);
+            renderMetaLine();
+        },
+        getMeta : () => ({ elapsed_second_text : formatElapsedSeconds(), reasoning_token_count : reasoningTokenCount, answer_token_count : answerTokenCount }),
+        setStoredMeta : (storedMeta) => {
+            // 방 전환 복원용 : 고정 메타라인만 표시 (타이머 없음)
+            if (!storedMeta) return;
+            metaLine.classList.remove("hidden");
+            metaLine.textContent = `⏱ ${storedMeta.elapsed_second_text}s · 생각 ${storedMeta.reasoning_token_count} 토큰 · 응답 ${storedMeta.answer_token_count} 토큰`;
+        },
+        appendReasoning : (chunkText) => {
+            // 생각 과정 실시간 누적 : 첫 조각에서 섹션을 펼치고, 내부 스크롤을 따라간다 (대기 지루함 해소)
+            clearRetryNotice();
+            if (reasoningDetails.classList.contains("hidden")) {
+                reasoningDetails.classList.remove("hidden");
+                reasoningDetails.open = true;
+            }
+            reasoningTokenCount += 1;
+            reasoningText.textContent += chunkText;
+            reasoningText.scrollTop = reasoningText.scrollHeight;
+            scrollFeedToBottom();
+        },
+        setStoredReasoning : (storedText) => {
+            // 방 전환 복원용 : 접힌 상태로 생각 과정을 채워 넣는다
+            if (!storedText) return;
+            reasoningDetails.classList.remove("hidden");
+            reasoningDetails.open = false;
+            reasoningText.textContent = storedText;
+        },
+        getReasoningText : () => reasoningText.textContent,
+        appendText : (chunkText) => {
+            clearRetryNotice();
+            const agentText = row.querySelector(".agent-text");
+            if (agentText.textContent === "") {
+                chunkText = chunkText.replace(/^\s+/, "");  // 선두 개행/공백 제거 (whitespace-pre-wrap 말풍선 부풀림 방지)
+                // 첫 답변 토큰 도착 : 생각 과정은 자동으로 접는다 (필요하면 다시 펼쳐볼 수 있다)
+                if (!reasoningDetails.classList.contains("hidden")) {
+                    reasoningDetails.open = false;
+                    row.querySelector(".reasoning-status").textContent = "";
+                }
+            }
+            if (chunkText === "") return;
+            const indicator = row.querySelector(".typing-indicator");
+            if (indicator) indicator.remove();
+            if (liveTimerId !== null) answerTokenCount += 1;   // 라이브 스트리밍 중일 때만 카운트 (복원 렌더링은 제외)
+            agentText.textContent += chunkText;
+            scrollFeedToBottom();
+        },
+        hasReceivedAnyText : () => reasoningText.textContent !== "" || row.querySelector(".agent-text").textContent !== "",
+        markRetrying : (noticeText) => {
+            // 자동 재시도 대기 표시 : 말풍선 안에 앰버색 안내를 띄운다 (다음 시도 데이터 도착 시 자동 제거)
+            retryNotice.classList.remove("hidden");
+            retryNotice.textContent = noticeText;
+            scrollFeedToBottom();
+        },
+        finalize : () => {
+            // 스트림 종료 시 : 타이머 정지·메타 고정 + 후행 공백 제거 + 빈 응답이면 플레이스홀더 표시
+            if (liveTimerId !== null) { clearInterval(liveTimerId); renderMetaLine(); liveTimerId = null; }
+            clearRetryNotice();
+            const indicator = row.querySelector(".typing-indicator");
+            if (indicator) indicator.remove();
+            reasoningDetails.open = false;
+            row.querySelector(".reasoning-status").textContent = "";
+            const agentText = row.querySelector(".agent-text");
+            agentText.textContent = agentText.textContent.replace(/\s+$/, "");
+            if (agentText.textContent === "") {
+                agentText.textContent = "(빈 응답 — 모델이 텍스트를 생성하지 않았습니다)";
+                agentText.classList.add("text-slate-500", "italic");
+            }
+            return agentText.textContent;
+        },
+        markError : (errorText, onManualRetry = null) => {
+            if (liveTimerId !== null) { clearInterval(liveTimerId); liveTimerId = null; metaLine.classList.add("hidden"); }
+            clearRetryNotice();
+            const indicator = row.querySelector(".typing-indicator");
+            if (indicator) indicator.remove();
+            const agentText = row.querySelector(".agent-text");
+            agentText.textContent = errorText;
+            agentText.classList.add("text-red-500", "dark:text-red-400");
+            if (onManualRetry) {
+                // 최종 실패 : 수동 재시도 버튼 제공 (클릭 시 이 에러 말풍선을 제거하고 같은 메시지로 재전송)
+                const retryButton = document.createElement("button");
+                retryButton.className   = "mt-2 block px-3 py-1.5 rounded-lg text-[11px] font-medium bg-red-100 hover:bg-red-200 text-red-700 dark:bg-red-950/60 dark:hover:bg-red-900/60 dark:text-red-300 border border-red-300 dark:border-red-800 transition";
+                retryButton.textContent = "↻ 다시 시도";
+                retryButton.onclick     = () => { row.remove(); onManualRetry(); };
+                agentText.after(retryButton);
+            }
+            scrollFeedToBottom();
+        }
+    };
+}
+
+/* ══════════════════ 전송 + 스트리밍 수신 (지수 백오프 자동 재시도) ══════════════════ */
+
+const STREAM_MAX_RETRY_COUNT   = 3;      // 최대 자동 재시도 횟수
+const STREAM_BASE_DELAY_MS     = 1000;   // 지수 백오프 기본 간격 : 1초 → 2초 → 4초
+
+class NonRetryableError extends Error {}  // 4xx 등 재시도가 무의미한 오류
+
+function sleepAsync(delayMs) { return new Promise(resolve => setTimeout(resolve, delayMs)); }
+
+async function sendMessage() {
+    const message = chatInput.value.trim();
+    const room    = getActiveRoom();
+    if (!message || isStreaming || !room) return;
+
+    // ① 사용자 메시지를 즉시 렌더링·저장하고 입력창을 비운다 (첫 메시지는 방 제목이 된다)
+    if (room.messages === null) room.messages = [];   // 서버 복원이 끝나기 전 전송한 경우 : 빈 목록으로 시작
+    appendUserBubble(message);
+    room.messages.push({ role : "user", text : message });
+    if (room.title === "새 대화") { room.title = message.slice(0, 24); renderRoomList(); document.getElementById("header-room-title").textContent = room.title; syncRoomToServerAsync(room); }
+    saveRooms();
+    chatInput.value        = "";
+    chatInput.style.height = "auto";
+
+    await executeStreamTurnAsync(room, message);
+}
+
+async function executeStreamTurnAsync(room, message) {
+    // 스트리밍 1턴 실행 : 5xx/네트워크 오류 시 지수 백오프로 자동 재시도하고,
+    // 최종 실패 시 토스트 + 수동 재시도 버튼을 제공한다.
+    const apiUrl        = document.getElementById("api-url").value.trim().replace(/\/+$/, "");
+    isStreaming         = true;
+    sendButton.disabled = true;
+    setStatus("응답 중", "bg-emerald-400 animate-pulse");
+
+    // ② 어시스턴트 말풍선을 미리 생성하고 스트리밍 텍스트를 누적한다 (경과 시간·토큰 카운터 즉시 시작)
+    const agentBubble = appendAgentBubble();
+    agentBubble.startLiveMeta();
+
+    let attemptCount = 0;
+    while (true) {
+        try {
+            const response = await fetch(`${apiUrl}/stream`, {
+                method  : "POST",
+                headers : { "Content-Type" : "application/json" },
+                body    : JSON.stringify({ thread_id : room.threadId, message : message, model : room.model || null, reasoning_effort : room.reasoningEffort || null, include_reasoning : true })
+            });
+            if (response.status >= 500) throw new Error(`HTTP ${response.status} (서버 오류)`);        // 5xx → 재시도 대상
+            if (!response.ok || !response.body) throw new NonRetryableError(`HTTP ${response.status}`); // 4xx → 즉시 실패
+
+            // NDJSON 이벤트 스트림 파싱 : {"type":"reasoning","text":...} 는 생각 과정 섹션에,
+            // {"type":"token","text":...} 는 답변 본문에 실시간 누적한다
+            const streamReader = response.body.getReader();
+            const textDecoder  = new TextDecoder("utf-8");
+            let   lineBuffer   = "";
+            const dispatchEventLine = (eventLine) => {
+                if (!eventLine.trim()) return;
+                try {
+                    const streamEvent = JSON.parse(eventLine);
+                    if (streamEvent.type === "reasoning")  agentBubble.appendReasoning(streamEvent.text);
+                    else if (streamEvent.type === "token") agentBubble.appendText(streamEvent.text);
+                } catch (_ignored) { agentBubble.appendText(eventLine); }   // NDJSON 이 아닌 서버(구버전) 폴백
+            };
+            while (true) {
+                const { done, value } = await streamReader.read();
+                if (done) break;
+                lineBuffer += textDecoder.decode(value, { stream : true });
+                const completeLines = lineBuffer.split("\n");
+                lineBuffer = completeLines.pop();   // 마지막 조각은 미완성 라인일 수 있으므로 버퍼에 남긴다
+                completeLines.forEach(dispatchEventLine);
+            }
+            dispatchEventLine(lineBuffer);   // 종료 후 잔여 버퍼 처리
+
+            const finalText = agentBubble.finalize();
+            room.messages.push({ role : "agent", text : finalText, reasoning : agentBubble.getReasoningText(), meta : agentBubble.getMeta() });
+            saveRooms();
+            setStatus("대기", "bg-slate-400 dark:bg-slate-600");
+            break;
+        } catch (error) {
+            // 자동 재시도 조건 : 재시도 가능 오류 + 아직 아무 데이터도 못 받음(중복 응답 방지) + 횟수 남음
+            const isRetryable = !(error instanceof NonRetryableError) && !agentBubble.hasReceivedAnyText() && attemptCount < STREAM_MAX_RETRY_COUNT;
+            if (isRetryable) {
+                attemptCount += 1;
+                const backoffDelayMs = STREAM_BASE_DELAY_MS * 2 ** (attemptCount - 1);   // 1초 → 2초 → 4초
+                agentBubble.markRetrying(`연결 실패 — ${backoffDelayMs / 1000}초 후 자동 재시도 (${attemptCount}/${STREAM_MAX_RETRY_COUNT})`);
+                setStatus(`재연결 ${attemptCount}/${STREAM_MAX_RETRY_COUNT}`, "bg-amber-400 animate-pulse");
+                await sleepAsync(backoffDelayMs);
+                continue;
+            }
+            // 최종 실패 : 에러 말풍선 + 토스트 + 수동 재시도 버튼
+            const failReason = agentBubble.hasReceivedAnyText() ? "응답 중 연결이 끊겼습니다" : `응답 실패 : ${error.message}`;
+            const errorText  = `${failReason} — 자동 재시도 ${attemptCount}회 모두 실패했거나 재시도할 수 없는 오류입니다.`;
+            agentBubble.markError(errorText, () => {
+                if (isStreaming) return;
+                room.messages = room.messages.filter(storedMessage => !(storedMessage.role === "error" && storedMessage.text === errorText));
+                saveRooms();
+                executeStreamTurnAsync(room, message);   // 같은 메시지로 재전송
+            });
+            room.messages.push({ role : "error", text : errorText });
+            saveRooms();
+            setStatus("오류", "bg-red-500");
+            showToast(`⚠ ${failReason}\n백엔드(포트 8002) 실행 여부를 확인한 뒤 '다시 시도'를 눌러주세요.`);
+            break;
+        }
+    }
+    isStreaming         = false;
+    sendButton.disabled = false;
+    chatInput.focus();
+}
+
+/* ══════════════════ 입력 UX ══════════════════ */
+
+// Enter 전송 / Shift+Enter 줄바꿈
+chatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+    }
+});
+
+// textarea 자동 높이
+chatInput.addEventListener("input", () => {
+    chatInput.style.height = "auto";
+    chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + "px";
+});
+
+/* ══════════════════ 초기화 ══════════════════ */
+(async function initializeApplication() {
+    initializeUserId();                                                              // 사용자 ID 복원 (없으면 자동 발급)
+    loadPanelState();                                                                // 패널 크기/접기 상태 복원
+    applySidebarState();
+    initializePanelResizeHandles();
+    applyDeveloperMode(localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === "on");   // 개발자 모드 저장값 복원 (기본 : 꺼짐, 디버그 패널 포함)
+    await loadRoomsAsync();                                                          // 서버에서 유저별 방 목록 로드 (실패 시 로컬 캐시 폴백)
+    renderRoomList();
+    renderActiveRoom();
+    loadModelOptions();
+    refreshDebugTabs();                                                              // 방 로드 후 디버그 패널 데이터 갱신
+    chatInput.focus();
+})();
+</script>
+</body>
+</html>

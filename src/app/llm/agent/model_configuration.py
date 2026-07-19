@@ -7,7 +7,8 @@ from typing      import Any
 
 @dataclass(frozen = True, slots = True)
 class ModelConfiguration:
-    SUPPORTED_PROVIDER_SET    : ClassVar[Set[str]]       = {"openai", "anthropic", "ollama", "lm_studio", "vllm"}
+    SUPPORTED_PROVIDER_SET    : ClassVar[Set[str]]       = {"openai", "anthropic", "google", "ollama", "lm_studio", "vllm"}
+    SUPPORTED_REASONING_EFFORT_SET : ClassVar[Set[str]]  = {"low", "medium", "high"}
     provider                  : str                              # openai | anthropic | ollama | lm_studio | vllm
     model_name                : str                              # 모델명
     api_key                   : Optional[str]            = None  # API 키 (기본값 : None)
@@ -19,6 +20,9 @@ class ModelConfiguration:
     default_header_dictionary : Optional[Dict[str, str]] = None  # 커스텀 헤더 (vLLM 사내 인증 등) (기본값 : None)
     extra_body_dictionary     : Optional[Dict[str, Any]] = None  # OpenAI 호환 확장 바디 (vLLM 전용 파라미터) (기본값 : None)
     reasoning_enabled         : Optional[bool]           = None  # 추론(thinking) 모드 : False=끔(지연 최소화), True=켬, None=모델 기본값 (현재 ollama 전용)
+    context_token_count       : Optional[int]            = None  # 컨텍스트 윈도우(num_ctx, ollama 전용) : 미설정 시 Ollama 기본 4096 — deepagents 시스템 프롬프트+히스토리가 이를 초과하면 프롬프트가 절단된다
+    reasoning_effort          : Optional[str]            = None  # 생각 강도 : low | medium | high | None(모델 기본)
+                                                                 # google → thinking_budget 매핑(low 1024 / medium 8192 / high 24576), ollama → think 레벨 전달(모델이 지원할 때만 유효)
 
     def __post_init__(self) -> None:
         if not isinstance(self.provider, str) or not self.provider.strip():
@@ -35,6 +39,12 @@ class ModelConfiguration:
             raise ValueError(f"INVALID MODEL TEMPERATURE : {self.temperature}")
         if self.maximum_token_count is not None and self.maximum_token_count <= 0:
             raise ValueError(f"INVALID MAXIMUM TOKEN COUNT : {self.maximum_token_count}")
+        if self.context_token_count is not None and self.context_token_count <= 0:
+            raise ValueError(f"INVALID CONTEXT TOKEN COUNT : {self.context_token_count}")
+        if self.reasoning_effort is not None:
+            object.__setattr__(self, "reasoning_effort", self.reasoning_effort.strip().lower())
+            if self.reasoning_effort not in self.SUPPORTED_REASONING_EFFORT_SET:
+                raise ValueError(f"UNSUPPORTED REASONING EFFORT : {self.reasoning_effort}")
         if self.timeout_second_count <= 0.0:
             raise ValueError(f"INVALID MODEL TIMEOUT : {self.timeout_second_count}")
         if self.maximum_retry_count < 0:
