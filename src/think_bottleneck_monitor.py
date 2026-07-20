@@ -47,6 +47,7 @@ from langchain_core.messages           import HumanMessage
 from langchain.agents.middleware.types import AgentMiddleware
 
 from app.llm.agent.model_configuration import ModelConfiguration
+from app.llm.agent.model_catalog       import ModelCatalog
 from app.llm.agent.deep_agent_factory  import DeepAgentFactory
 
 load_dotenv()
@@ -116,11 +117,10 @@ class ThinkTrimmingMiddleware(AgentMiddleware):
 # deepagents 체크포인트의 pending writes 를 적용하지 못해 messages 가 0 으로 보인다)
 ##################################################
 
-def _create_compiled_graph(checkpoint_saver, model_name : Optional[str] = None, reasoning_effort : Optional[str] = None):
-    # model_name       : 요청별 모델 선택 (None 이면 .env 기본 모델)
-    # reasoning_effort : 생각 강도 low|medium|high (google → thinking_budget, ollama → think 레벨)
+def _create_legacy_model_configuration(model_name : Optional[str] = None, reasoning_effort : Optional[str] = None) -> ModelConfiguration:
+    # 모델 카탈로그(config/models.yaml)가 없을 때의 .env(MODEL_*) 폴백 경로
     model_provider = os.getenv("MODEL_PROVIDER", "ollama").strip().lower()
-    model_configuration = ModelConfiguration(
+    return ModelConfiguration(
         provider            = model_provider,
         model_name          = model_name or os.getenv("MODEL_NAME", "qwen3-vl:4b"),
         api_key             = os.getenv("MODEL_API_KEY") or None,
@@ -131,6 +131,9 @@ def _create_compiled_graph(checkpoint_saver, model_name : Optional[str] = None, 
         context_token_count = int(os.getenv("MODEL_CONTEXT_TOKEN_COUNT", "8192")),   # Ollama 기본 4096 은 deepagents 프롬프트+히스토리에 부족 → 절단 → thinking 폭주
         maximum_token_count = int(os.getenv("MODEL_MAXIMUM_TOKEN_COUNT", "4096") or "4096")   # 폭주 시 생성 상한 (thinking 포함)
     )
+
+
+def _create_compiled_graph(checkpoint_saver, model_configuration : ModelConfiguration):
     return DeepAgentFactory.create(
         model_configuration,
         checkpointer    = checkpoint_saver,
@@ -183,7 +186,8 @@ class MonitorApplication:
     def __init__(self) -> None:
         self.checkpoint_saver           = None
         self.checkpoint_connection_pool = None
-        self.compiled_graph_dictionary  = {}   # 모델명 → 컴파일 그래프 캐시 (요청별 모델 선택 지원, 체크포인터 공유)
+        self.compiled_graph_dictionary  = {}   # (모델 키, 생각 강도) → 컴파일 그래프 캐시 (요청별 모델 선택 지원, 체크포인터 공유)
+        self.model_catalog              = ModelCatalog.load_default()   # config/models.yaml (없으면 None → .env 폴백)
         self.application               = FastAPI(title = "Think Bottleneck Monitor", lifespan = self._lifespan_async)
         # 로컬 진단 대시보드(frontend/index.html 을 file:// 로 직접 오픈)에서의 fetch 를 허용한다
         self.application.add_middleware(CORSMiddleware, allow_origins = ["*"], allow_methods = ["*"], allow_headers = ["*"])
@@ -199,15 +203,31 @@ class MonitorApplication:
         self.application.add_api_route("/dev/api-client",              self.get_api_client_page_async, methods = ["GET"], include_in_schema = False)   # APIDog 스타일 API 테스트 페이지 (디버그 패널 [API 테스트] 버튼)
         self.redis_client = None   # 지연 생성 (디버그 패널에서 처음 조회할 때 연결)
 
+    def _get_default_model_key(self) -> str:
+        # 카탈로그가 있으면 카탈로그 기본 키, 없으면 .env 기본 모델명
+        return self.model_catalog.get_default_model_key() if self.model_catalog is not None else os.getenv("MODEL_NAME", "qwen3-vl:4b")
+
+    def _resolve_model_configuration(self, model_name : Optional[str], reasoning_effort : Optional[str] = None) -> ModelConfiguration:
+        # 카탈로그 우선 : model_name 은 카탈로그 키(config/models.yaml)다. 카탈로그가 없거나 키가 없으면 .env 폴백
+        if self.model_catalog is not None:
+            model_key = model_name or self.model_catalog.get_default_model_key()
+            if self.model_catalog.has_model(model_key):
+                return self.model_catalog.create_model_configuration(model_key, reasoning_effort)
+        return _create_legacy_model_configuration(model_name, reasoning_effort)
+
     def _get_or_create_compiled_graph(self, model_name : Optional[str], reasoning_effort : Optional[str] = None):
         # (모델, 생각 강도)별 그래프를 지연 생성해 캐싱한다 (같은 체크포인터를 공유하므로 스레드 이력은 설정과 무관하게 이어진다)
-        cache_key = (model_name or os.getenv("MODEL_NAME", "qwen3-vl:4b"), reasoning_effort)
+        cache_key = (model_name or self._get_default_model_key(), reasoning_effort)
         if cache_key not in self.compiled_graph_dictionary:
-            self.compiled_graph_dictionary[cache_key] = _create_compiled_graph(self.checkpoint_saver, cache_key[0], cache_key[1])
+            self.compiled_graph_dictionary[cache_key] = _create_compiled_graph(self.checkpoint_saver, self._resolve_model_configuration(cache_key[0], cache_key[1]))
         return self.compiled_graph_dictionary[cache_key]
 
     async def list_models_async(self) -> Dict[str, Any]:
-        # 프론트 모델 선택 드롭다운용 : ollama 는 설치 모델을 프록시, 그 외 프로바이더는 기본 모델만 노출한다
+        # 프론트 모델 선택 드롭다운용.
+        # 카탈로그 모드 : config/models.yaml 의 모델 키 목록을 그대로 노출한다 (요청의 model 값 = 카탈로그 키)
+        if self.model_catalog is not None:
+            return {"default_model" : self.model_catalog.get_default_model_key(), "models" : self.model_catalog.get_model_key_list(), "provider" : "catalog"}
+        # 폴백 모드 : ollama 는 설치 모델을 프록시, 그 외 프로바이더는 기본 모델만 노출한다
         default_model  = os.getenv("MODEL_NAME", "qwen3-vl:4b")
         model_provider = os.getenv("MODEL_PROVIDER", "ollama").strip().lower()
         if model_provider != "ollama":
@@ -394,6 +414,19 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
             "think_tag_kb"  : round(think_total_byte_count / 1024, 1)
         }
 
+    @staticmethod
+    def _summarize_stream_error(exception : Exception) -> str:
+        # 스트리밍 중 발생한 예외를 한 줄로 요약한다 (google ClientError 는 code/message 속성을 활용).
+        # 클라이언트 개발자 모드에서 그대로 노출되므로 원인(429 quota, 401 등)이 드러나야 한다.
+        status_code    = getattr(exception, "code", None) or getattr(exception, "status_code", None)
+        detail_message = getattr(exception, "message", None) or str(exception)
+        detail_message = " ".join(str(detail_message).split())[:400]   # 개행/중복 공백 정규화 + 길이 제한
+        error_prefix   = f"[{type(exception).__name__}"
+        if status_code is not None:
+            error_prefix += f" {status_code}"
+        error_prefix += "]"
+        return f"{error_prefix} {detail_message}"
+
     async def stream_async(self, stream_request : StreamRequest) -> StreamingResponse:
         runnable_configuration = {"configurable" : {"thread_id" : stream_request.thread_id}}
         input_dictionary       = {"messages" : [HumanMessage(content = stream_request.message)]}
@@ -420,20 +453,30 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
         async def generate_token_stream_async() -> AsyncIterator[str]:
             request_started_at   = time.perf_counter()
             is_first_token_seen  = False
-            print(f"STREAM START : THREAD {stream_request.thread_id} - MODEL {stream_request.model or os.getenv('MODEL_NAME', 'qwen3-vl:4b')} - EFFORT {stream_request.reasoning_effort or 'default'}", flush = True)
-            async for message_chunk, _metadata in compiled_graph.astream(input_dictionary, runnable_configuration, stream_mode = "messages"):
-                # 생각 과정(reasoning) : 사용자가 대기 시간 동안 진행 상황을 볼 수 있게 실시간 전송한다 (NDJSON 모드 한정)
-                reasoning_text, token_text = extract_chunk_texts(message_chunk)
-                if reasoning_text and stream_request.include_reasoning:
-                    yield json.dumps({"type" : "reasoning", "text" : reasoning_text}, ensure_ascii = False) + "\n"
-                if not token_text:
-                    continue
-                if not is_first_token_seen:
-                    is_first_token_seen = True
-                    # TTFT(Time To First Token) : 첫 "답변" 토큰 기준 (생각 토큰 제외) — 프리필+생각 병목이 여기 숫자로 드러난다
-                    print(f"TTFT : THREAD {stream_request.thread_id} - {(time.perf_counter() - request_started_at) * 1000:.0f}ms", flush = True)
-                yield json.dumps({"type" : "token", "text" : token_text}, ensure_ascii = False) + "\n" if stream_request.include_reasoning else token_text
-            print(f"TURN COMPLETED : THREAD {stream_request.thread_id} - TOTAL {(time.perf_counter() - request_started_at) * 1000:.0f}ms", flush = True)
+            print(f"STREAM START : THREAD {stream_request.thread_id} - MODEL {stream_request.model or self._get_default_model_key()} - EFFORT {stream_request.reasoning_effort or 'default'}", flush = True)
+            try:
+                async for message_chunk, _metadata in compiled_graph.astream(input_dictionary, runnable_configuration, stream_mode = "messages"):
+                    # 생각 과정(reasoning) : 사용자가 대기 시간 동안 진행 상황을 볼 수 있게 실시간 전송한다 (NDJSON 모드 한정)
+                    reasoning_text, token_text = extract_chunk_texts(message_chunk)
+                    if reasoning_text and stream_request.include_reasoning:
+                        yield json.dumps({"type" : "reasoning", "text" : reasoning_text}, ensure_ascii = False) + "\n"
+                    if not token_text:
+                        continue
+                    if not is_first_token_seen:
+                        is_first_token_seen = True
+                        # TTFT(Time To First Token) : 첫 "답변" 토큰 기준 (생각 토큰 제외) — 프리필+생각 병목이 여기 숫자로 드러난다
+                        print(f"TTFT : THREAD {stream_request.thread_id} - {(time.perf_counter() - request_started_at) * 1000:.0f}ms", flush = True)
+                    yield json.dumps({"type" : "token", "text" : token_text}, ensure_ascii = False) + "\n" if stream_request.include_reasoning else token_text
+                print(f"TURN COMPLETED : THREAD {stream_request.thread_id} - TOTAL {(time.perf_counter() - request_started_at) * 1000:.0f}ms", flush = True)
+            except Exception as exception:
+                # 모델 호출 실패(429 quota, 인증 오류 등) : StreamingResponse 는 이미 200 헤더를 보냈으므로
+                # HTTP 상태로 알릴 수 없다 → 스트림 본문에 error 이벤트를 실어 클라이언트가 원인을 표시하게 한다
+                error_text = MonitorApplication._summarize_stream_error(exception)
+                print(f"STREAM ERROR : THREAD {stream_request.thread_id} - {error_text}", flush = True)
+                if stream_request.include_reasoning:
+                    yield json.dumps({"type" : "error", "text" : error_text}, ensure_ascii = False) + "\n"
+                else:
+                    yield f"\n[ERROR] {error_text}"
 
         response_media_type = "application/x-ndjson" if stream_request.include_reasoning else "text/plain; charset=utf-8"
         return StreamingResponse(generate_token_stream_async(), media_type = response_media_type, headers = {"Cache-Control" : "no-cache", "X-Accel-Buffering" : "no"})
