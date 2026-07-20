@@ -46,24 +46,33 @@ class ChatModelFactory:
         if provider == "google":
             # thinking_budget : Gemini 2.5+ 의 생각 강도 제어 (0 이면 생각 끔, None 이면 모델 기본)
             # include_thoughts : True 면 생각 요약이 응답에 포함되어 UI 로 스트리밍할 수 있다
-            thinking_budget = None
-            if model_configuration.reasoning_effort is not None:
-                thinking_budget = ChatModelFactory.GOOGLE_THINKING_BUDGET_DICTIONARY[model_configuration.reasoning_effort]
-            elif model_configuration.reasoning_enabled is False:
-                thinking_budget = 0
+            # Gemma 계열은 thinking 파라미터 자체를 지원하지 않으므로(전송 시 400) None 으로 두어 전송을 생략한다
+            is_thinking_supported = not model_configuration.model_name.lower().startswith("gemma")
+            thinking_budget       = None
+            include_thoughts      = None
+            if is_thinking_supported:
+                if model_configuration.reasoning_effort is not None:
+                    thinking_budget = ChatModelFactory.GOOGLE_THINKING_BUDGET_DICTIONARY[model_configuration.reasoning_effort]
+                elif model_configuration.reasoning_enabled is False:
+                    thinking_budget = 0
+                include_thoughts = bool(model_configuration.reasoning_enabled)
             return ChatGoogleGenerativeAI(
                 model             = model_configuration.model_name,
                 google_api_key    = model_configuration.api_key,
                 temperature       = model_configuration.temperature,
                 max_output_tokens = model_configuration.maximum_token_count,
                 thinking_budget   = thinking_budget,
-                include_thoughts  = bool(model_configuration.reasoning_enabled),
+                include_thoughts  = include_thoughts,
                 timeout           = model_configuration.timeout_second_count,
                 max_retries       = model_configuration.maximum_retry_count
             )
         if provider == "ollama":
             # reasoning : 생각 강도(low/medium/high, 모델이 지원할 때만 유효) > on/off(True/False) > 모델 기본(None) 순으로 적용
             # (thinking 이 켜져 있으면 짧은 답변에도 수천 토큰을 생성해 턴 지연이 분 단위로 커진다)
+            # 원격 ollama API(https://ollama.com)를 사용하는 경우 default_header_dictionary 에 Authorization 헤더를 포함한다
+            client_kwargs = {"timeout" : model_configuration.timeout_second_count}
+            if model_configuration.default_header_dictionary:
+                client_kwargs["headers"] = model_configuration.default_header_dictionary
             return ChatOllama(
                 model                = model_configuration.model_name,
                 base_url             = model_configuration.base_url or "http://localhost:11434",
@@ -71,7 +80,7 @@ class ChatModelFactory:
                 reasoning            = model_configuration.reasoning_effort or model_configuration.reasoning_enabled,
                 num_ctx              = model_configuration.context_token_count,
                 num_predict          = model_configuration.maximum_token_count,
-                client_kwargs        = {"timeout" : model_configuration.timeout_second_count},
+                client_kwargs        = client_kwargs,
                 sync_client_kwargs   = {"transport" : httpx.HTTPTransport(retries = model_configuration.maximum_retry_count)},
                 async_client_kwargs  = {"transport" : httpx.AsyncHTTPTransport(retries = model_configuration.maximum_retry_count)}
             )

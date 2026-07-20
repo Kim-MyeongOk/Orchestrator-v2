@@ -41,6 +41,7 @@ from app.llm.chat.chat_query_service                           import ChatQueryS
 from common.database.postgresql.postgresql_configuration       import PostgresqlConfiguration
 from common.cache.redis_stream.redis_configuration             import RedisConfiguration
 from app.llm.agent.model_configuration                         import ModelConfiguration
+from app.llm.agent.model_catalog                               import ModelCatalog
 from app.llm.agent.deep_agent_factory                          import DeepAgentFactory
 from app.llm.agent.tavily_search_tool_factory                  import TavilySearchToolFactory
 from app.llm.agent.research_subagent_factory                   import ResearchSubAgentFactory
@@ -207,6 +208,10 @@ class ServerApplication:
 
     @staticmethod
     def _get_model_configuration() -> ModelConfiguration:
+        # 모델 카탈로그(config/models.yaml) 우선 : 기본 모델 항목을 사용한다. 카탈로그가 없으면 .env(MODEL_*) 폴백
+        model_catalog = ModelCatalog.load_default()
+        if model_catalog is not None:
+            return model_catalog.create_model_configuration(model_catalog.get_default_model_key())
         default_header_dictionary = ServerApplication._get_optional_dictionary("MODEL_DEFAULT_HEADERS")
         if default_header_dictionary is not None and not all(isinstance(field_name, str) and isinstance(field_value, str) for field_name, field_value in default_header_dictionary.items()):
             raise ValueError("INVALID MODEL DEFAULT HEADERS : MODEL_DEFAULT_HEADERS")
