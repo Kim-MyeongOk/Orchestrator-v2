@@ -374,6 +374,38 @@ function switchRoom(roomId) {
     refreshDebugTabs();   // 디버그 패널이 열려 있으면 새 방 기준으로 즉시 갱신
 }
 
+/* ── 채팅방 이름 변경 (인라인 편집) ── */
+let renamingRoomId = null;   // 현재 이름 편집 중인 방 (없으면 null)
+
+function startRoomRename(event, roomId) {
+    if (event) event.stopPropagation();
+    // 응답 중인 방은 이름을 바꿀 수 없다 (스트리밍이 끝난 뒤 변경)
+    if (isStreaming && roomId === activeRoomId) {
+        showToast("⚠ 응답 중에는 이 채팅방의 이름을 변경할 수 없습니다.\n응답이 끝난 뒤 다시 시도해주세요.");
+        return;
+    }
+    renamingRoomId = roomId;
+    renderRoomList();
+}
+
+function commitRoomRename(roomId, newTitleText) {
+    const room = roomList.find(storedRoom => storedRoom.roomId === roomId);
+    renamingRoomId = null;
+    const trimmedTitle = (newTitleText || "").trim().slice(0, 60);
+    if (room && trimmedTitle && trimmedTitle !== room.title) {
+        room.title = trimmedTitle;
+        saveRooms();
+        syncRoomToServerAsync(room);   // 서버(chat_room 테이블)에도 반영
+        if (roomId === activeRoomId) document.getElementById("header-room-title").textContent = room.title;
+    }
+    renderRoomList();
+}
+
+function cancelRoomRename() {
+    renamingRoomId = null;
+    renderRoomList();
+}
+
 function deleteRoom(event, roomId) {
     event.stopPropagation();
     if (isStreaming) return;
@@ -774,12 +806,12 @@ function renderRequestLogTab() {
 /* ══════════════════ 채팅방 정보 탭 : 메타데이터 테이블 + CSV 저장 ══════════════════ */
 
 function collectRoomInfoRows() {
-    // CSV/테이블 공용 데이터 (Run ID 는 오케스트레이터(8000) 잡 파이프라인 전용 개념이라 이 채팅 스트림에서는 미발급)
+    // CSV/테이블 공용 데이터 (Run ID = 마지막 턴의 그래프 실행 식별자 : /stream 이 발급해 X-Run-Id 헤더와 start 이벤트로 내려준다)
     return roomList.map(room => ({
         "제목"      : room.title,
         "Room ID"   : room.roomId,
         "Thread ID" : room.threadId,
-        "Run ID"    : "— (미발급)",
+        "Run ID"    : room.lastRunId || "— (아직 없음)",
         "모델"      : room.model || "(기본)",
         "생각 정도" : room.reasoningEffort || "(기본)",
         "메시지 수" : room.messages === null ? "(미로드)" : room.messages.length,
@@ -840,15 +872,46 @@ function renderRoomList() {
         const isActive = room.roomId === activeRoomId;
         const item = document.createElement("div");
         item.className = `group flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition text-xs ${isActive ? "bg-slate-200 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100" : "text-slate-600 dark:text-slate-400 hover:bg-slate-200/70 dark:hover:bg-slate-800/60 border border-transparent"}`;
-        item.onclick   = () => switchRoom(room.roomId);
+
+        // 이름 편집 중인 방 : 입력창만 표시하고 방 전환 클릭은 비활성화한다
+        if (room.roomId === renamingRoomId) {
+            const titleInput = document.createElement("input");
+            titleInput.type      = "text";
+            titleInput.value     = room.title;
+            titleInput.maxLength = 60;
+            titleInput.className = "flex-1 min-w-0 bg-white dark:bg-slate-950 border border-indigo-400 dark:border-indigo-500 rounded px-1.5 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500";
+            titleInput.onclick   = (event) => event.stopPropagation();
+            titleInput.onkeydown = (event) => {
+                event.stopPropagation();   // Enter 가 메시지 전송으로 번지지 않게 한다
+                if (event.key === "Enter")  { event.preventDefault(); commitRoomRename(room.roomId, titleInput.value); }
+                if (event.key === "Escape") { event.preventDefault(); cancelRoomRename(); }
+            };
+            titleInput.onblur = () => { if (renamingRoomId === room.roomId) commitRoomRename(room.roomId, titleInput.value); };
+            item.appendChild(titleInput);
+            roomListElement.appendChild(item);
+            requestAnimationFrame(() => { titleInput.focus(); titleInput.select(); });
+            continue;
+        }
+
+        item.onclick = () => switchRoom(room.roomId);
 
         const title = document.createElement("span");
         title.className   = "flex-1 truncate";
         title.textContent = room.title;
+        title.title       = "더블클릭하면 이름을 변경할 수 있습니다";
+        title.ondblclick  = (event) => startRoomRename(event, room.roomId);
 
         const modelTag = document.createElement("span");
         modelTag.className   = "text-[9px] text-slate-400 dark:text-slate-600 shrink-0";
         modelTag.textContent = room.model ? room.model.split(":")[0] : "";
+
+        // 응답 중인 방은 이름 변경 불가 (버튼을 흐리게 표시)
+        const isRenameBlocked  = isStreaming && isActive;
+        const renameButton     = document.createElement("button");
+        renameButton.className = `shrink-0 w-5 h-5 rounded flex items-center justify-center transition opacity-0 group-hover:opacity-100 ${isRenameBlocked ? "text-slate-300 dark:text-slate-700 cursor-not-allowed" : "text-slate-400 dark:text-slate-600 hover:text-indigo-500 dark:hover:text-indigo-400 hover:bg-slate-300/60 dark:hover:bg-slate-700/60"}`;
+        renameButton.textContent = "✎";
+        renameButton.title       = isRenameBlocked ? "응답 중에는 이름을 변경할 수 없습니다" : "채팅방 이름 변경";
+        renameButton.onclick     = (event) => startRoomRename(event, room.roomId);
 
         const deleteButton = document.createElement("button");
         deleteButton.className   = "shrink-0 w-5 h-5 rounded flex items-center justify-center text-slate-400 dark:text-slate-600 hover:text-red-500 dark:hover:text-red-400 hover:bg-slate-300/60 dark:hover:bg-slate-700/60 opacity-0 group-hover:opacity-100 transition";
@@ -856,7 +919,7 @@ function renderRoomList() {
         deleteButton.title       = "채팅방 삭제";
         deleteButton.onclick     = (event) => deleteRoom(event, room.roomId);
 
-        item.append(title, modelTag, deleteButton);
+        item.append(title, modelTag, renameButton, deleteButton);
         roomListElement.appendChild(item);
     }
 }
@@ -1256,6 +1319,7 @@ async function executeStreamTurnAsync(room, message) {
     isStreaming            = true;
     currentAbortController = new AbortController();   // 이 턴을 중단할 수 있게 한다
     updateSendButtonMode();                           // 전송 버튼 → 중단 버튼
+    renderRoomList();                                 // 응답 중인 방의 이름변경 버튼을 비활성 표시로 갱신
     setStatus("응답 중", "bg-emerald-400 animate-pulse");
 
     // ② 어시스턴트 말풍선을 미리 생성하고 스트리밍 텍스트를 누적한다 (경과 시간·토큰 카운터 즉시 시작)
@@ -1282,6 +1346,10 @@ async function executeStreamTurnAsync(room, message) {
 
             // NDJSON 이벤트 스트림 파싱 : {"type":"reasoning","text":...} 는 생각 과정 섹션에,
             // {"type":"token","text":...} 는 답변 본문에 실시간 누적한다
+            // Run ID : 헤더로도 내려온다 (include_reasoning=false 라 start 이벤트가 없는 경우의 폴백)
+            const responseRunId = response.headers.get("X-Run-Id");
+            if (responseRunId) { room.lastRunId = responseRunId; saveRooms(); refreshDebugTabs(); }
+
             const streamReader = response.body.getReader();
             const textDecoder  = new TextDecoder("utf-8");
             let   lineBuffer   = "";
@@ -1290,7 +1358,8 @@ async function executeStreamTurnAsync(room, message) {
                 if (!eventLine.trim()) return;
                 try {
                     const streamEvent = JSON.parse(eventLine);
-                    if (streamEvent.type === "reasoning")  agentBubble.appendReasoning(streamEvent.text);
+                    if (streamEvent.type === "start")      { room.lastRunId = streamEvent.run_id; saveRooms(); refreshDebugTabs(); }   // 이번 턴의 Run ID
+                    else if (streamEvent.type === "reasoning")  agentBubble.appendReasoning(streamEvent.text);
                     else if (streamEvent.type === "token") agentBubble.appendText(streamEvent.text);
                     else if (streamEvent.type === "error") streamErrorText = streamEvent.text;   // 200 스트림 본문으로 온 오류
                 } catch (_ignored) { agentBubble.appendText(eventLine); }   // NDJSON 이 아닌 서버(구버전) 폴백
@@ -1388,6 +1457,7 @@ async function executeStreamTurnAsync(room, message) {
     isStreaming            = false;
     currentAbortController = null;
     updateSendButtonMode();   // 중단 버튼 → 전송 버튼 복귀
+    renderRoomList();         // 이름변경 버튼 다시 활성화
     chatInput.focus();
 }
 
