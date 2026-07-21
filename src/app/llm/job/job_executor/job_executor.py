@@ -84,33 +84,19 @@ class JobExecutor:
         )
         return entry_id is not None
 
-    async def _store_chunk_async(self, run_id : uuid.UUID, thread_id : uuid.UUID, normalized_chunk : NormalizedChunk, message_accumulator : MessageAccumulator, connection : Connection) -> None:
-        await self.job_chunk_repository.insert_chunk_async(
-            self.uuid_v7_generator.generate(),
-            run_id,
-            normalized_chunk,
-            connection
-        )
+    @staticmethod
+    def _buffer_chunk(normalized_chunk : NormalizedChunk, message_accumulator : MessageAccumulator, pending_flush_dictionary : Dict[str, List[Any]]) -> None:
+        # 일괄 flush 전까지 메모리에 누적한다 (DB 쓰기는 종료 시점 JobTransfer 가 한 트랜잭션으로 수행)
+        pending_flush_dictionary["chunk_list"].append(normalized_chunk)
         task_projection_dictionary = TaskProjector.create_task_projection_dictionary(normalized_chunk)
         if task_projection_dictionary is not None:
-            await self.job_task_repository.upsert_task_async(run_id, task_projection_dictionary, connection)
+            pending_flush_dictionary["task_projection_list"].append(task_projection_dictionary)
         if normalized_chunk.chunk_type == "messages":
             merged_message_dictionary = message_accumulator.accumulate(normalized_chunk)
             if merged_message_dictionary is not None:
-                await self.job_message_repository.insert_message_async(
-                    self.uuid_v7_generator.generate(),
-                    run_id,
-                    thread_id,
-                    merged_message_dictionary,
-                    connection
-                )
+                pending_flush_dictionary["streamed_message_list"].append(merged_message_dictionary)
         elif normalized_chunk.chunk_type in {"tasks", "custom"}:
-            await self.job_event_repository.insert_event_async(
-                self.uuid_v7_generator.generate(),
-                run_id,
-                normalized_chunk,
-                connection
-            )
+            pending_flush_dictionary["event_chunk_list"].append(normalized_chunk)
 
     async def _get_distributed_cancellation_reason_async(self, run_id : uuid.UUID) -> Optional[str]:
         meta_dictionary = await self.redis_stream_client.get_hash_dictionary_async(RedisKeyBuilder.get_job_meta_key(str(run_id)))
@@ -122,15 +108,10 @@ class JobExecutor:
             return meta_dictionary.get("cancel_reason") or "heartbeat_expired"
         return None
 
-    async def _process_chunk_async(self, run_id : uuid.UUID, thread_id : uuid.UUID, normalized_chunk : NormalizedChunk, message_accumulator : MessageAccumulator, cancellation_reason_dictionary : Dict[str, str]) -> None:
-        async with self.job_repository.postgresql_pool_manager.get_pool().acquire() as connection:
-            async with connection.transaction():
-                is_active = await self.job_repository.lock_job_for_chunk_async(connection, run_id)
-                if not is_active:
-                    cancellation_reason_dictionary["reason"] = "heartbeat_expired"
-                    raise asyncio.CancelledError()
-                await self._store_chunk_async(run_id, thread_id, normalized_chunk, message_accumulator, connection)
-        # PostgreSQL을 영구 원본으로 먼저 커밋한다. Redis 발행이 실패해도 reaper/구독 폴백이 청크를 복구한다.
+    async def _process_chunk_async(self, run_id : uuid.UUID, thread_id : uuid.UUID, normalized_chunk : NormalizedChunk, message_accumulator : MessageAccumulator, cancellation_reason_dictionary : Dict[str, str], pending_flush_dictionary : Dict[str, List[Any]]) -> None:
+        # 실행 중에는 Redis 로만 발행하고(실시간 구독), DB 적재는 종료 시점에 일괄로 수행한다.
+        # 따라서 프로세스가 flush 전에 죽으면 청크는 유실되고 reaper 가 실패 상태만 DB 에 남긴다.
+        JobExecutor._buffer_chunk(normalized_chunk, message_accumulator, pending_flush_dictionary)
         is_published = await self._publish_chunk_async(run_id, normalized_chunk)
         if not is_published:
             cancellation_reason_dictionary["reason"] = await self._get_distributed_cancellation_reason_async(run_id) or "cancelled"
@@ -164,6 +145,13 @@ class JobExecutor:
         cancellation_reason_dictionary : Dict[str, str]               = {}
         job_status                                                    = JobStatus.COMPLETED
         error_message                  : Optional[str]                = None
+        # 일괄 flush 버퍼 : 실행 중 누적했다가 종료 시 JobTransfer 가 한 트랜잭션으로 적재한다
+        pending_flush_dictionary : Dict[str, List[Any]] = {
+            "chunk_list"            : [],
+            "event_chunk_list"      : [],
+            "task_projection_list"  : [],
+            "streamed_message_list" : []
+        }
         try:
             async with asyncio.timeout(self.job_configuration.execution_timeout_second_count):
                 is_running = await self.job_repository.update_job_running_async(run_id)
@@ -189,7 +177,7 @@ class JobExecutor:
                     if normalized_chunk is None:
                         continue
                     normalized_chunk = chunk_task_correlation_resolver.resolve(normalized_chunk)
-                    await self._process_chunk_async(run_id, thread_id, normalized_chunk, message_accumulator, cancellation_reason_dictionary)
+                    await self._process_chunk_async(run_id, thread_id, normalized_chunk, message_accumulator, cancellation_reason_dictionary, pending_flush_dictionary)
         except TimeoutError:
             job_status    = JobStatus.FAILED
             error_message = f"EXECUTION TIMEOUT : {self.job_configuration.execution_timeout_second_count}s"
@@ -216,7 +204,8 @@ class JobExecutor:
                     await heartbeat_task
                 except asyncio.CancelledError:
                     pass
-            merged_message_dictionary_list = message_accumulator.flush_all()
+            # 스트리밍 중 확정된 메시지 + 종료 시 남은 잔여 메시지를 합쳐 최종 메시지 목록을 만든다
+            merged_message_dictionary_list = pending_flush_dictionary["streamed_message_list"] + message_accumulator.flush_all()
             usage_dictionary_list          = [merged_message_dictionary["usage"] for merged_message_dictionary in merged_message_dictionary_list if isinstance(merged_message_dictionary.get("usage"), dict)]
             usage_dictionary               = UsageAccumulator.get_usage_dictionary(usage_dictionary_list)
             await asyncio.shield(
@@ -226,6 +215,9 @@ class JobExecutor:
                     job_status,
                     error_message,
                     usage_dictionary,
-                    merged_message_dictionary_list
+                    merged_message_dictionary_list,
+                    pending_flush_dictionary["chunk_list"],
+                    pending_flush_dictionary["event_chunk_list"],
+                    pending_flush_dictionary["task_projection_list"]
                 )
             )

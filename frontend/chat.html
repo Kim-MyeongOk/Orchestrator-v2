@@ -947,8 +947,9 @@ function renderActiveRoom() {
             <p class="text-slate-400/80 dark:text-slate-700 text-[11px] mt-1.5">백엔드 : <code class="font-mono">python src/think_bottleneck_monitor.py</code> (포트 8002)</p></div>`;
         return;
     }
+    let userMessageIndex = 0;   // 사용자 메시지 순번 : 질문 수정 시 체크포인트 절단 위치로 쓰인다
     for (const storedMessage of room.messages) {
-        if (storedMessage.role === "user")       appendUserBubble(storedMessage.text, false);
+        if (storedMessage.role === "user")       { appendUserBubble(storedMessage.text, false, userMessageIndex); userMessageIndex += 1; }
         else if (storedMessage.role === "error") appendAgentBubble().markError(storedMessage.text);
         else                                     { const bubble = appendAgentBubble(); bubble.setStoredReasoning(storedMessage.reasoning); bubble.appendText(storedMessage.text); bubble.finalize(); bubble.setStoredMeta(storedMessage.meta); }
     }
@@ -1106,13 +1107,96 @@ function appendSystemNotice(text) {
     scrollFeedToBottom();
 }
 
-function appendUserBubble(text, animate = true) {
+function appendUserBubble(text, animate = true, userMessageIndex = null) {
+    // userMessageIndex : 이 질문이 몇 번째 사용자 메시지인지(0-based). 지정되면 마우스 오버 시 수정 버튼이 나타난다
     const row = document.createElement("div");
-    row.className = "flex justify-end" + (animate ? " bubble-enter" : "");
-    row.innerHTML = `<div class="max-w-[78%] md:max-w-[65%] bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow"></div>`;
-    row.firstElementChild.textContent = text;
+    row.className = "group flex justify-end items-center gap-1.5" + (animate ? " bubble-enter" : "");
+
+    const bubble = document.createElement("div");
+    bubble.className   = "max-w-[78%] md:max-w-[65%] bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow";
+    bubble.textContent = text;
+
+    if (userMessageIndex !== null) {
+        // 수정 버튼 : 이 질문부터 대화를 다시 이어간다 (이후 내용은 삭제)
+        const editButton = document.createElement("button");
+        editButton.className   = "shrink-0 w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 dark:text-slate-500 hover:text-indigo-500 dark:hover:text-indigo-400 hover:bg-slate-200 dark:hover:bg-slate-800 opacity-0 group-hover:opacity-100 transition text-xs order-first";
+        editButton.textContent = "✎";
+        editButton.title       = "질문 수정 후 여기서부터 다시 대화";
+        editButton.onclick     = () => startUserMessageEdit(row, userMessageIndex, text);
+        row.append(editButton, bubble);
+    } else {
+        row.appendChild(bubble);
+    }
     messageFeed.appendChild(row);
     if (animate) forceScrollFeedToBottom();   // 라이브 전송 시 : 항상 하단으로 이동(재고정). 복원(animate=false)은 renderRoom 이 처리
+}
+
+function startUserMessageEdit(rowElement, userMessageIndex, currentText) {
+    if (isStreaming) { showToast("⚠ 응답 중에는 질문을 수정할 수 없습니다."); return; }
+    // 말풍선을 편집용 textarea 로 교체한다
+    const editorWrapper = document.createElement("div");
+    editorWrapper.className = "w-full max-w-[85%] md:max-w-[72%] flex flex-col gap-2";
+    editorWrapper.innerHTML = `
+        <textarea class="edit-textarea w-full bg-white dark:bg-slate-950 border border-indigo-400 dark:border-indigo-500 rounded-xl px-3 py-2 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-indigo-500" rows="3"></textarea>
+        <div class="flex items-center justify-end gap-2">
+            <span class="mr-auto text-[11px] text-amber-600 dark:text-amber-400">이 질문 이후의 대화는 삭제됩니다</span>
+            <button class="cancel-edit-button px-3 py-1.5 rounded-lg text-[11px] font-medium bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 transition">취소</button>
+            <button class="submit-edit-button px-3 py-1.5 rounded-lg text-[11px] font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition">여기서부터 다시 보내기</button>
+        </div>`;
+    const textArea = editorWrapper.querySelector(".edit-textarea");
+    textArea.value = currentText;
+
+    rowElement.className = "flex justify-end";
+    rowElement.innerHTML = "";
+    rowElement.appendChild(editorWrapper);
+    textArea.focus();
+    textArea.setSelectionRange(textArea.value.length, textArea.value.length);
+
+    editorWrapper.querySelector(".cancel-edit-button").onclick = () => renderActiveRoom();
+    editorWrapper.querySelector(".submit-edit-button").onclick = () => submitEditedUserMessageAsync(userMessageIndex, textArea.value);
+    textArea.onkeydown = (event) => {
+        event.stopPropagation();
+        if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitEditedUserMessageAsync(userMessageIndex, textArea.value); }
+        if (event.key === "Escape") { event.preventDefault(); renderActiveRoom(); }
+    };
+}
+
+async function submitEditedUserMessageAsync(userMessageIndex, newText) {
+    const room        = getActiveRoom();
+    const editedText  = (newText || "").trim();
+    if (!room || isStreaming || !editedText) return;
+
+    // ① 서버 체크포인트에서 이 질문 이후를 제거한다 (모델이 삭제된 대화를 기억하지 않도록)
+    try {
+        const response = await fetch(`${getApiUrl()}/threads/${encodeURIComponent(room.threadId)}/truncate`, {
+            method  : "POST",
+            headers : { "Content-Type" : "application/json" },
+            body    : JSON.stringify({ keep_human_message_count : userMessageIndex })   // 이 질문 앞까지만 유지
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    } catch (error) {
+        showToast(`⚠ 이전 대화 정리에 실패했습니다 : ${error.message}\n서버 상태를 확인해주세요.`);
+        return;
+    }
+
+    // ② 화면·저장 목록에서도 해당 질문 이후를 잘라낸다 (잘려나간 내용은 보여주지 않는다)
+    let userMessageSeenCount = 0;
+    let cutIndex             = room.messages.length;
+    for (let messageIndex = 0; messageIndex < room.messages.length; messageIndex += 1) {
+        if (room.messages[messageIndex].role === "user") {
+            if (userMessageSeenCount === userMessageIndex) { cutIndex = messageIndex; break; }
+            userMessageSeenCount += 1;
+        }
+    }
+    room.messages = room.messages.slice(0, cutIndex);
+    saveRooms();
+    renderActiveRoom();
+
+    // ③ 수정된 질문으로 그 지점부터 대화를 이어간다
+    room.messages.push({ role : "user", text : editedText });
+    appendUserBubble(editedText, true, userMessageIndex);
+    saveRooms();
+    await executeStreamTurnAsync(room, editedText);
 }
 
 function renderMarkdownToHtml(rawText) {
@@ -1302,7 +1386,7 @@ async function sendMessage() {
 
     // ① 사용자 메시지를 즉시 렌더링·저장하고 입력창을 비운다 (첫 메시지는 방 제목이 된다)
     if (room.messages === null) room.messages = [];   // 서버 복원이 끝나기 전 전송한 경우 : 빈 목록으로 시작
-    appendUserBubble(message);
+    appendUserBubble(message, true, room.messages.filter(storedMessage => storedMessage.role === "user").length);   // 순번 = 기존 사용자 메시지 수
     room.messages.push({ role : "user", text : message });
     if (room.title === "새 대화") { room.title = message.slice(0, 24); renderRoomList(); document.getElementById("header-room-title").textContent = room.title; syncRoomToServerAsync(room); }
     saveRooms();

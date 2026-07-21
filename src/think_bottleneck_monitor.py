@@ -45,6 +45,7 @@ from pydantic                import BaseModel
 
 from langchain_core.messages           import BaseMessage
 from langchain_core.messages           import HumanMessage
+from langchain_core.messages           import RemoveMessage
 from langchain.agents.middleware.types import AgentMiddleware
 
 from app.llm.agent.model_configuration import ModelConfiguration
@@ -185,6 +186,15 @@ class StreamRequest(BaseModel):
                                                 # False : 답변 토큰만 평문 스트림 (기존 클라이언트 하위호환)
 
 
+class TruncateThreadRequest(BaseModel):
+    # 유지할 사용자 메시지 개수. 그 다음 사용자 메시지부터 이후 전부를 체크포인트에서 제거한다.
+    # (특정 질문을 수정해 그 지점부터 대화를 다시 이어갈 때 사용)
+    #
+    # 개수 기준인 이유 : 실패/중단된 턴은 프론트 목록에는 남지만 체크포인트에는 기록되지 않아
+    # 양쪽 순번이 어긋난다. 개수 기준이면 어긋나도 "제거할 것 없음"으로 안전하게 끝난다.
+    keep_human_message_count : int
+
+
 class MonitorApplication:
     def __init__(self) -> None:
         self.checkpoint_saver           = None
@@ -202,6 +212,7 @@ class MonitorApplication:
         self.application.add_api_route("/rooms",                       self.upsert_room_async,        methods = ["POST"])
         self.application.add_api_route("/rooms/{room_id}",             self.delete_room_async,        methods = ["DELETE"])
         self.application.add_api_route("/threads/{thread_id}/messages", self.get_thread_messages_async, methods = ["GET"])
+        self.application.add_api_route("/threads/{thread_id}/truncate", self.truncate_thread_async,     methods = ["POST"])   # 질문 수정 후 그 지점부터 재개
         self.application.add_api_route("/redis/{thread_id}",           self.get_redis_snapshot_async,  methods = ["GET"])   # 디버그 패널용 Redis 캐시 조회
         self.application.add_api_route("/dev/api-client",              self.get_api_client_page_async, methods = ["GET"], include_in_schema = False)   # APIDog 스타일 API 테스트 페이지 (디버그 패널 [API 테스트] 버튼)
         self.redis_client           = None    # 지연 생성 (디버그 패널 / 런 청크 버퍼가 공유)
@@ -409,6 +420,35 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
             return {"thread_id" : thread_id, "matched_key_count" : len(matched_key_list), "keys" : key_snapshot_list}
         except Exception as exception:
             raise HTTPException(status_code = 502, detail = f"REDIS SNAPSHOT FAILED : {exception}")
+
+    async def truncate_thread_async(self, thread_id : str, truncate_request : TruncateThreadRequest) -> Dict[str, Any]:
+        # 특정 사용자 질문(0-based 순번)부터 이후 메시지를 체크포인트에서 제거한다.
+        # RemoveMessage 를 add_messages 리듀서에 흘려보내 해당 메시지들을 상태에서 지운다.
+        if truncate_request.keep_human_message_count < 0:
+            raise HTTPException(status_code = 400, detail = "INVALID KEEP HUMAN MESSAGE COUNT")
+        runnable_configuration = {"configurable" : {"thread_id" : thread_id}}
+        compiled_graph         = self._get_or_create_compiled_graph(None, None)
+        state_snapshot         = await compiled_graph.aget_state(runnable_configuration)
+        message_list           = state_snapshot.values.get("messages", []) if state_snapshot else []
+
+        human_message_seen_count = 0
+        cut_index                = None
+        for message_index, message in enumerate(message_list):
+            if isinstance(message, HumanMessage):
+                if human_message_seen_count == truncate_request.keep_human_message_count:
+                    cut_index = message_index
+                    break
+                human_message_seen_count += 1
+        if cut_index is None:
+            # 체크포인트에 그만큼의 사용자 메시지가 없다 (실패/중단 턴으로 프론트와 어긋난 경우) → 제거할 것 없음
+            print(f"THREAD TRUNCATE SKIPPED : THREAD {thread_id} - KEEP {truncate_request.keep_human_message_count} - HUMAN {human_message_seen_count}", flush = True)
+            return {"thread_id" : thread_id, "kept_count" : len(message_list), "removed_count" : 0}
+
+        removal_message_list = [RemoveMessage(id = message.id) for message in message_list[cut_index:] if getattr(message, "id", None) is not None]
+        if removal_message_list:
+            await compiled_graph.aupdate_state(runnable_configuration, {"messages" : removal_message_list})
+        print(f"THREAD TRUNCATED : THREAD {thread_id} - KEPT {cut_index} - REMOVED {len(removal_message_list)}", flush = True)
+        return {"thread_id" : thread_id, "kept_count" : cut_index, "removed_count" : len(removal_message_list)}
 
     async def get_thread_messages_async(self, thread_id : str) -> Dict[str, Any]:
         # 대화 내용 복원 : LangGraph 체크포인트(messages 채널)를 표시용 [{role, text, reasoning}] 으로 변환한다
