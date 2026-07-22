@@ -146,6 +146,9 @@ class LLMAPIRouter:
             job_dictionary = await self.job_manager.get_persisted_job_async(run_id, x_user_id)
         except JobNotFoundError as job_not_found_error:
             raise HTTPException(status_code = 404, detail = str(job_not_found_error)) from job_not_found_error
+        # 청크가 유실된 실패 작업이면 저장된 원본 질문으로 모델을 재호출해 복구한 뒤 실시간으로 스트리밍한다
+        if JobManager.is_lost_job(job_dictionary):
+            await self.job_manager.retry_lost_job_async(run_id, x_user_id)
         actual_output_format = output_format or job_dictionary["output_format"]
         if actual_output_format not in {"deepagents", "openai"}:
             raise HTTPException(status_code = 400, detail = "INVALID OUTPUT FORMAT")

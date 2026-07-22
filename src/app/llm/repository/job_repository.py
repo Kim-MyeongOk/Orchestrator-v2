@@ -203,6 +203,32 @@ RETURNING TRUE
     async def update_job_running_async(self, run_id : uuid.UUID) -> bool:
         return await self.update_job_status_async(run_id = run_id, status = "running")
 
+    async def reset_job_for_retry_async(self, run_id : uuid.UUID) -> bool:
+        # 청크 유실로 실패한 작업을 재실행 가능한 pending 상태로 되돌린다.
+        # 안전장치 : 실패 상태이면서 적재된 청크가 하나도 없는 경우에만 리셋한다 (부분 적재분 훼손 방지)
+        current_time = datetime.now(timezone.utc)
+        query_text   = """
+UPDATE llm_job
+SET
+    status               = 'pending',
+    error_message        = NULL,
+    started_at           = NULL,
+    completed_at         = NULL,
+    message_count        = 0,
+    event_count          = 0,
+    last_sequence_number = 0,
+    chunk_count          = 0,
+    task_count           = 0,
+    updated_at           = $2::TIMESTAMPTZ
+WHERE run_id = $1
+AND   status = 'failed'
+AND   COALESCE(chunk_count, 0) = 0
+AND   NOT EXISTS (SELECT 1 FROM llm_job_chunk WHERE run_id = $1)
+RETURNING TRUE
+"""
+        async with self.postgresql_pool_manager.get_pool().acquire() as connection:
+            return bool(await connection.fetchval(query_text, run_id, current_time))
+
     async def update_job_finished_async(self, run_id : uuid.UUID, status : str, error_message : Optional[str], usage_dictionary : Optional[Dict[str, Any]], message_count : int, event_count : int, last_sequence_number : int = 0, chunk_count : int = 0, task_count : int = 0, connection : Optional[asyncpg.Connection] = None) -> bool:
         if status not in JobRepository.TERMINAL_STATUS_SET:
             raise ValueError(f"INVALID JOB FINAL STATUS : {status}")

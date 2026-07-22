@@ -286,6 +286,68 @@ class JobManager:
             raise JobNotFoundError(f"JOB NOT FOUND : {run_id}")
         return job_dictionary
 
+    @staticmethod
+    def is_lost_job(job_dictionary : Dict[str, Any]) -> bool:
+        # 청크 유실 판정 : 실패 상태인데 적재된 청크가 하나도 없다 (일괄 flush 전에 죽었거나 flush 자체가 실패)
+        return str(job_dictionary.get("status")) == JobStatus.FAILED.value and int(job_dictionary.get("chunk_count") or 0) == 0
+
+    async def retry_lost_job_async(self, run_id : uuid.UUID, user_id : uuid.UUID) -> bool:
+        # 유실된 작업 복구 : 저장된 원본 질문(request_payload)으로 같은 run_id 를 다시 실행한다.
+        # 실행이 성공하면 JobTransfer 가 상태를 completed 로 갱신한다.
+        job_dictionary = await self.get_persisted_job_async(run_id, user_id)
+        if not JobManager.is_lost_job(job_dictionary):
+            return False
+        if str(run_id) in self._task_dictionary:
+            return False   # 이미 재실행 중
+        if not await self.job_repository.reset_job_for_retry_async(run_id):
+            return False
+
+        run_id_string              = str(run_id)
+        thread_id                  = uuid.UUID(str(job_dictionary["thread_id"]))
+        request_payload_dictionary = job_dictionary.get("request_payload") or {}
+        stored_model_dictionary    = request_payload_dictionary.get("model") or {}
+        model_configuration        = self._get_model_configuration(stored_model_dictionary or None)
+        created_at                 = datetime.now(timezone.utc).isoformat()
+        meta_dictionary            = {
+            "run_id"           : run_id_string,
+            "thread_id"        : str(thread_id),
+            "user_id"          : str(user_id),
+            "status"           : JobStatus.PENDING.value,
+            "heartbeat_at"     : created_at,
+            "created_at"       : created_at,
+            "updated_at"       : created_at,
+            "error_message"    : "",
+            "usage"            : "",
+            "message_count"    : "0",
+            "event_count"      : "0",
+            "cancel_requested" : "0",
+            "cancel_reason"    : ""
+        }
+        try:
+            await self.redis_stream_client.set_hash_dictionary_with_expire_async(
+                RedisKeyBuilder.get_job_meta_key(run_id_string),
+                meta_dictionary,
+                self.job_configuration.redis_safety_ttl_second_count
+            )
+        except RedisError:
+            await self.job_repository.update_job_finished_async(run_id, JobStatus.FAILED.value, "REDIS INITIALIZATION FAILED", None, 0, 0)
+            return False
+
+        execution_task = asyncio.create_task(
+            self.job_executor.execute_async(
+                run_id,
+                thread_id,
+                user_id,
+                request_payload_dictionary,
+                model_configuration,
+                lambda : self._get_cancellation_reason(run_id_string)
+            ),
+            name = f"llm-job-retry-{run_id_string}"
+        )
+        self._task_dictionary[run_id_string] = execution_task
+        execution_task.add_done_callback(lambda finished_task : self._remove_finished_task(run_id_string, finished_task))
+        return True
+
     async def get_job_result_async(self, run_id : uuid.UUID, user_id : uuid.UUID) -> Dict[str, Any]:
         job_dictionary = await self.get_job_async(run_id, user_id)
         if JobStatus(job_dictionary["status"]).is_terminal():

@@ -18,6 +18,7 @@ import re
 import sys
 import json
 import time
+import uuid
 import asyncio
 
 # Windows : psycopg 비동기는 ProactorEventLoop 를 지원하지 않으므로 Selector 정책으로 전환한다
@@ -44,11 +45,14 @@ from pydantic                import BaseModel
 
 from langchain_core.messages           import BaseMessage
 from langchain_core.messages           import HumanMessage
+from langchain_core.messages           import RemoveMessage
 from langchain.agents.middleware.types import AgentMiddleware
 
 from app.llm.agent.model_configuration import ModelConfiguration
 from app.llm.agent.model_catalog       import ModelCatalog
 from app.llm.agent.deep_agent_factory  import DeepAgentFactory
+
+from app.orchestrator.service.redis_chunk_buffer import RedisChunkBuffer
 
 load_dotenv()
 
@@ -182,6 +186,15 @@ class StreamRequest(BaseModel):
                                                 # False : 답변 토큰만 평문 스트림 (기존 클라이언트 하위호환)
 
 
+class TruncateThreadRequest(BaseModel):
+    # 유지할 사용자 메시지 개수. 그 다음 사용자 메시지부터 이후 전부를 체크포인트에서 제거한다.
+    # (특정 질문을 수정해 그 지점부터 대화를 다시 이어갈 때 사용)
+    #
+    # 개수 기준인 이유 : 실패/중단된 턴은 프론트 목록에는 남지만 체크포인트에는 기록되지 않아
+    # 양쪽 순번이 어긋난다. 개수 기준이면 어긋나도 "제거할 것 없음"으로 안전하게 끝난다.
+    keep_human_message_count : int
+
+
 class MonitorApplication:
     def __init__(self) -> None:
         self.checkpoint_saver           = None
@@ -190,7 +203,7 @@ class MonitorApplication:
         self.model_catalog              = ModelCatalog.load_default()   # config/models.yaml (없으면 None → .env 폴백)
         self.application               = FastAPI(title = "Think Bottleneck Monitor", lifespan = self._lifespan_async)
         # 로컬 진단 대시보드(frontend/index.html 을 file:// 로 직접 오픈)에서의 fetch 를 허용한다
-        self.application.add_middleware(CORSMiddleware, allow_origins = ["*"], allow_methods = ["*"], allow_headers = ["*"])
+        self.application.add_middleware(CORSMiddleware, allow_origins = ["*"], allow_methods = ["*"], allow_headers = ["*"], expose_headers = ["X-Run-Id", "X-Thread-Id"])
         self.application.add_api_route("/diagnose",                    self.diagnose_thread_async,    methods = ["GET"])
         self.application.add_api_route("/models",                      self.list_models_async,        methods = ["GET"])
         self.application.add_api_route("/stream",                      self.stream_async,             methods = ["POST"])
@@ -199,9 +212,12 @@ class MonitorApplication:
         self.application.add_api_route("/rooms",                       self.upsert_room_async,        methods = ["POST"])
         self.application.add_api_route("/rooms/{room_id}",             self.delete_room_async,        methods = ["DELETE"])
         self.application.add_api_route("/threads/{thread_id}/messages", self.get_thread_messages_async, methods = ["GET"])
+        self.application.add_api_route("/threads/{thread_id}/truncate", self.truncate_thread_async,     methods = ["POST"])   # 질문 수정 후 그 지점부터 재개
         self.application.add_api_route("/redis/{thread_id}",           self.get_redis_snapshot_async,  methods = ["GET"])   # 디버그 패널용 Redis 캐시 조회
         self.application.add_api_route("/dev/api-client",              self.get_api_client_page_async, methods = ["GET"], include_in_schema = False)   # APIDog 스타일 API 테스트 페이지 (디버그 패널 [API 테스트] 버튼)
-        self.redis_client = None   # 지연 생성 (디버그 패널에서 처음 조회할 때 연결)
+        self.redis_client           = None    # 지연 생성 (디버그 패널 / 런 청크 버퍼가 공유)
+        self.run_chunk_buffer       = None    # run_id 단위 청크 버퍼 (지연 생성)
+        self.is_run_buffer_disabled = False   # Redis 미가동 등으로 버퍼링 실패 시 True (스트리밍은 계속)
 
     def _get_default_model_key(self) -> str:
         # 카탈로그가 있으면 카탈로그 기본 키, 없으면 .env 기본 모델명
@@ -338,9 +354,8 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
             raise HTTPException(status_code = 404, detail = f"API CLIENT PAGE NOT FOUND : {frontend_file_path}")
         return FileResponse(frontend_file_path, media_type = "text/html")
 
-    async def get_redis_snapshot_async(self, thread_id : str) -> Dict[str, Any]:
-        # 디버그 패널용 : 해당 스레드와 관련된 Redis 키를 실시간 스냅샷으로 반환한다
-        # (오케스트레이터 파이프라인의 청크 버퍼 키 형식 : orch:{thread_id}:run:{run_id}:chunk_list)
+    def _get_redis_client(self):
+        # 지연 생성 : 디버그 스냅샷 / Run id 청크 버퍼가 공유한다
         import redis.asyncio as redis_asyncio
         if self.redis_client is None:
             self.redis_client = redis_asyncio.Redis(
@@ -348,6 +363,31 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
                 port = int(os.getenv("REDIS_PORT", "6379")),
                 db   = int(os.getenv("REDIS_DATABASE_INDEX", "0"))
             )
+        return self.redis_client
+
+    def _get_run_chunk_buffer(self) -> Optional[RedisChunkBuffer]:
+        # 런(run_id) 단위 청크 버퍼. Redis 연결 실패 시 None 을 돌려 스트리밍은 계속되게 한다
+        if self.is_run_buffer_disabled:
+            return None
+        if self.run_chunk_buffer is None:
+            self.run_chunk_buffer = RedisChunkBuffer(self._get_redis_client())
+        return self.run_chunk_buffer
+
+    async def _append_run_chunk_async(self, thread_id : str, run_id : str, chunk_dictionary : Dict[str, Any]) -> None:
+        # 베스트 에포트 : Redis 가 없거나 실패해도 응답 스트리밍을 절대 막지 않는다 (실패 시 이후 버퍼링 비활성화)
+        run_chunk_buffer = self._get_run_chunk_buffer()
+        if run_chunk_buffer is None:
+            return
+        try:
+            await run_chunk_buffer.append_chunk_async(thread_id, run_id, chunk_dictionary)
+        except Exception as exception:
+            self.is_run_buffer_disabled = True
+            print(f"RUN BUFFER DISABLED : REDIS UNAVAILABLE - {exception}", flush = True)
+
+    async def get_redis_snapshot_async(self, thread_id : str) -> Dict[str, Any]:
+        # 디버그 패널용 : 해당 스레드와 관련된 Redis 키를 실시간 스냅샷으로 반환한다
+        # (런 청크 버퍼 키 형식 : orch:{thread_id}:run:{run_id}:chunk_list)
+        self._get_redis_client()
         def try_parse_json(raw_value):
             text = raw_value.decode("utf-8", errors = "replace") if isinstance(raw_value, bytes) else str(raw_value)
             try:
@@ -380,6 +420,35 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
             return {"thread_id" : thread_id, "matched_key_count" : len(matched_key_list), "keys" : key_snapshot_list}
         except Exception as exception:
             raise HTTPException(status_code = 502, detail = f"REDIS SNAPSHOT FAILED : {exception}")
+
+    async def truncate_thread_async(self, thread_id : str, truncate_request : TruncateThreadRequest) -> Dict[str, Any]:
+        # 특정 사용자 질문(0-based 순번)부터 이후 메시지를 체크포인트에서 제거한다.
+        # RemoveMessage 를 add_messages 리듀서에 흘려보내 해당 메시지들을 상태에서 지운다.
+        if truncate_request.keep_human_message_count < 0:
+            raise HTTPException(status_code = 400, detail = "INVALID KEEP HUMAN MESSAGE COUNT")
+        runnable_configuration = {"configurable" : {"thread_id" : thread_id}}
+        compiled_graph         = self._get_or_create_compiled_graph(None, None)
+        state_snapshot         = await compiled_graph.aget_state(runnable_configuration)
+        message_list           = state_snapshot.values.get("messages", []) if state_snapshot else []
+
+        human_message_seen_count = 0
+        cut_index                = None
+        for message_index, message in enumerate(message_list):
+            if isinstance(message, HumanMessage):
+                if human_message_seen_count == truncate_request.keep_human_message_count:
+                    cut_index = message_index
+                    break
+                human_message_seen_count += 1
+        if cut_index is None:
+            # 체크포인트에 그만큼의 사용자 메시지가 없다 (실패/중단 턴으로 프론트와 어긋난 경우) → 제거할 것 없음
+            print(f"THREAD TRUNCATE SKIPPED : THREAD {thread_id} - KEEP {truncate_request.keep_human_message_count} - HUMAN {human_message_seen_count}", flush = True)
+            return {"thread_id" : thread_id, "kept_count" : len(message_list), "removed_count" : 0}
+
+        removal_message_list = [RemoveMessage(id = message.id) for message in message_list[cut_index:] if getattr(message, "id", None) is not None]
+        if removal_message_list:
+            await compiled_graph.aupdate_state(runnable_configuration, {"messages" : removal_message_list})
+        print(f"THREAD TRUNCATED : THREAD {thread_id} - KEPT {cut_index} - REMOVED {len(removal_message_list)}", flush = True)
+        return {"thread_id" : thread_id, "kept_count" : cut_index, "removed_count" : len(removal_message_list)}
 
     async def get_thread_messages_async(self, thread_id : str) -> Dict[str, Any]:
         # 대화 내용 복원 : LangGraph 체크포인트(messages 채널)를 표시용 [{role, text, reasoning}] 으로 변환한다
@@ -428,7 +497,11 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
         return f"{error_prefix} {detail_message}"
 
     async def stream_async(self, stream_request : StreamRequest) -> StreamingResponse:
-        runnable_configuration = {"configurable" : {"thread_id" : stream_request.thread_id}}
+        # 이번 턴(그래프 1회 실행)을 식별하는 run_id 를 발급한다.
+        # 오케스트레이터(GraphStreamExecutor)와 동일하게 configurable.run_id 로 그래프에 전달하고,
+        # 청크를 orch:{thread_id}:run:{run_id}:chunk_list 버퍼에 누적해 디버그 패널에서 추적할 수 있게 한다.
+        run_id                 = str(uuid.uuid4())
+        runnable_configuration = {"configurable" : {"thread_id" : stream_request.thread_id, "run_id" : run_id}}
         input_dictionary       = {"messages" : [HumanMessage(content = stream_request.message)]}
         compiled_graph         = self._get_or_create_compiled_graph(stream_request.model, stream_request.reasoning_effort)
 
@@ -453,33 +526,44 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
         async def generate_token_stream_async() -> AsyncIterator[str]:
             request_started_at   = time.perf_counter()
             is_first_token_seen  = False
-            print(f"STREAM START : THREAD {stream_request.thread_id} - MODEL {stream_request.model or self._get_default_model_key()} - EFFORT {stream_request.reasoning_effort or 'default'}", flush = True)
+            print(f"STREAM START : THREAD {stream_request.thread_id} - RUN {run_id} - MODEL {stream_request.model or self._get_default_model_key()} - EFFORT {stream_request.reasoning_effort or 'default'}", flush = True)
+            # 첫 이벤트로 run_id 를 알린다 (클라이언트가 이번 턴을 식별/추적할 수 있게)
+            if stream_request.include_reasoning:
+                yield json.dumps({"type" : "start", "run_id" : run_id, "thread_id" : stream_request.thread_id}, ensure_ascii = False) + "\n"
             try:
                 async for message_chunk, _metadata in compiled_graph.astream(input_dictionary, runnable_configuration, stream_mode = "messages"):
                     # 생각 과정(reasoning) : 사용자가 대기 시간 동안 진행 상황을 볼 수 있게 실시간 전송한다 (NDJSON 모드 한정)
                     reasoning_text, token_text = extract_chunk_texts(message_chunk)
                     if reasoning_text and stream_request.include_reasoning:
+                        await self._append_run_chunk_async(stream_request.thread_id, run_id, {"type" : "reasoning", "text" : reasoning_text})
                         yield json.dumps({"type" : "reasoning", "text" : reasoning_text}, ensure_ascii = False) + "\n"
                     if not token_text:
                         continue
                     if not is_first_token_seen:
                         is_first_token_seen = True
                         # TTFT(Time To First Token) : 첫 "답변" 토큰 기준 (생각 토큰 제외) — 프리필+생각 병목이 여기 숫자로 드러난다
-                        print(f"TTFT : THREAD {stream_request.thread_id} - {(time.perf_counter() - request_started_at) * 1000:.0f}ms", flush = True)
+                        print(f"TTFT : THREAD {stream_request.thread_id} - RUN {run_id} - {(time.perf_counter() - request_started_at) * 1000:.0f}ms", flush = True)
+                    await self._append_run_chunk_async(stream_request.thread_id, run_id, {"type" : "token", "text" : token_text})
                     yield json.dumps({"type" : "token", "text" : token_text}, ensure_ascii = False) + "\n" if stream_request.include_reasoning else token_text
-                print(f"TURN COMPLETED : THREAD {stream_request.thread_id} - TOTAL {(time.perf_counter() - request_started_at) * 1000:.0f}ms", flush = True)
+                print(f"TURN COMPLETED : THREAD {stream_request.thread_id} - RUN {run_id} - TOTAL {(time.perf_counter() - request_started_at) * 1000:.0f}ms", flush = True)
             except Exception as exception:
                 # 모델 호출 실패(429 quota, 인증 오류 등) : StreamingResponse 는 이미 200 헤더를 보냈으므로
                 # HTTP 상태로 알릴 수 없다 → 스트림 본문에 error 이벤트를 실어 클라이언트가 원인을 표시하게 한다
                 error_text = MonitorApplication._summarize_stream_error(exception)
-                print(f"STREAM ERROR : THREAD {stream_request.thread_id} - {error_text}", flush = True)
+                print(f"STREAM ERROR : THREAD {stream_request.thread_id} - RUN {run_id} - {error_text}", flush = True)
+                await self._append_run_chunk_async(stream_request.thread_id, run_id, {"type" : "error", "text" : error_text})
                 if stream_request.include_reasoning:
                     yield json.dumps({"type" : "error", "text" : error_text}, ensure_ascii = False) + "\n"
                 else:
                     yield f"\n[ERROR] {error_text}"
 
         response_media_type = "application/x-ndjson" if stream_request.include_reasoning else "text/plain; charset=utf-8"
-        return StreamingResponse(generate_token_stream_async(), media_type = response_media_type, headers = {"Cache-Control" : "no-cache", "X-Accel-Buffering" : "no"})
+        # X-Run-Id / X-Thread-Id : 스트림 본문을 파싱하지 않고도 이번 턴을 식별할 수 있게 헤더로도 노출한다
+        return StreamingResponse(
+            generate_token_stream_async(),
+            media_type = response_media_type,
+            headers    = {"Cache-Control" : "no-cache", "X-Accel-Buffering" : "no", "X-Run-Id" : run_id, "X-Thread-Id" : stream_request.thread_id}
+        )
 
     def get_application(self) -> FastAPI:
         return self.application

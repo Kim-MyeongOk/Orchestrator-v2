@@ -87,67 +87,109 @@ class JobTransfer:
                 return content_value[:200] if isinstance(content_value, str) else str(content_value)[:200]
         return None
 
-    async def transfer_async(self, run_id : uuid.UUID, thread_id : uuid.UUID, job_status : JobStatus, error_message : Optional[str], usage_dictionary : Optional[Dict[str, Any]], merged_message_dictionary_list : List[Dict[str, Any]]) -> bool:
+    async def _flush_status_only_async(self, run_id : uuid.UUID, error_message : str) -> bool:
+        # 일괄 flush 실패(=청크 유실) : 청크/메시지는 포기하고 실패 상태값만 DB 에 남긴다.
+        # 이후 해당 run_id 의 stream 이 요청되면 원본 질문으로 모델을 재호출해 복구한다.
+        try:
+            return await self.job_repository.update_job_finished_async(
+                run_id,
+                JobStatus.FAILED.value,
+                error_message,
+                None,
+                0,
+                0
+            )
+        except Exception:
+            return False
+
+    async def transfer_async(self, run_id : uuid.UUID, thread_id : uuid.UUID, job_status : JobStatus, error_message : Optional[str], usage_dictionary : Optional[Dict[str, Any]], merged_message_dictionary_list : List[Dict[str, Any]], normalized_chunk_list : Optional[List[Any]] = None, event_chunk_list : Optional[List[Any]] = None, task_projection_dictionary_list : Optional[List[Dict[str, Any]]] = None) -> bool:
         is_updated           = False
         message_count        = 0
         event_count          = 0
         chunk_count          = 0
         task_count           = 0
         last_sequence_number = 0
-        async with self.postgresql_pool_manager.get_pool().acquire() as connection:
-            async with connection.transaction():
-                is_active      = await self.job_repository.lock_job_for_transfer_async(connection, run_id)
-                job_dictionary = await connection.fetchrow("SELECT user_id, turn_number FROM llm_job WHERE run_id = $1", run_id)
-                if is_active:
-                    for merged_message_dictionary in merged_message_dictionary_list:
-                        await self.job_message_repository.insert_message_async(
-                            self.uuid_v7_generator.generate(),
+        normalized_chunk_list           = normalized_chunk_list or []
+        event_chunk_list                = event_chunk_list or []
+        task_projection_dictionary_list = task_projection_dictionary_list or []
+        try:
+            async with self.postgresql_pool_manager.get_pool().acquire() as connection:
+                async with connection.transaction():
+                    is_active      = await self.job_repository.lock_job_for_transfer_async(connection, run_id)
+                    job_dictionary = await connection.fetchrow("SELECT user_id, turn_number FROM llm_job WHERE run_id = $1", run_id)
+                    if is_active:
+                        # ── 일괄 flush : 실행 중 누적한 청크/이벤트/태스크를 한 트랜잭션으로 적재한다 ──
+                        await self.job_chunk_repository.insert_chunk_list_async(
+                            [self.uuid_v7_generator.generate() for _ in normalized_chunk_list],
                             run_id,
-                            thread_id,
-                            merged_message_dictionary,
+                            normalized_chunk_list,
                             connection
                         )
-                        if merged_message_dictionary.get("role") == "ai" and merged_message_dictionary.get("ns_path") == "":
-                            await self.thread_message_repository.upsert_assistant_message_async(
+                        for task_projection_dictionary in task_projection_dictionary_list:
+                            await self.job_task_repository.upsert_task_async(run_id, task_projection_dictionary, connection)
+                        for event_chunk in event_chunk_list:
+                            await self.job_event_repository.insert_event_async(
                                 self.uuid_v7_generator.generate(),
-                                thread_id,
                                 run_id,
-                                int(job_dictionary["turn_number"]) if job_dictionary is not None else 1,
-                                1000,
+                                event_chunk,
+                                connection
+                            )
+                        for merged_message_dictionary in merged_message_dictionary_list:
+                            await self.job_message_repository.insert_message_async(
+                                self.uuid_v7_generator.generate(),
+                                run_id,
+                                thread_id,
                                 merged_message_dictionary,
                                 connection
                             )
-                    await self.job_task_repository.mark_unfinished_task_list_async(run_id, job_status.value, connection)
-                last_sequence_number         = await self.job_chunk_repository.get_last_sequence_number_async(run_id, connection)
-                stored_usage_dictionary_list = await self.job_message_repository.get_usage_dictionary_list_async(run_id, connection)
-                if usage_dictionary is None:
-                    usage_dictionary = UsageAccumulator.get_usage_dictionary(stored_usage_dictionary_list)
-                if is_active:
-                    message_count = await self.job_message_repository.get_message_count_async(run_id, connection)
-                    event_count   = await self.job_event_repository.get_event_count_async(run_id, connection)
-                    chunk_count   = await self.job_chunk_repository.get_chunk_count_async(run_id, connection)
-                    task_count    = await self.job_task_repository.get_task_count_async(run_id, connection)
-                    is_updated    = await self.job_repository.update_job_finished_async(
-                        run_id,
-                        job_status.value,
-                        error_message,
-                        usage_dictionary,
-                        message_count,
-                        event_count,
-                        last_sequence_number,
-                        chunk_count,
-                        task_count,
-                        connection
-                    )
-                    if job_dictionary is not None:
-                        await self.chat_thread_repository.update_thread_on_finish_async(
-                            thread_id,
-                            job_dictionary["user_id"],
+                            if merged_message_dictionary.get("role") == "ai" and merged_message_dictionary.get("ns_path") == "":
+                                await self.thread_message_repository.upsert_assistant_message_async(
+                                    self.uuid_v7_generator.generate(),
+                                    thread_id,
+                                    run_id,
+                                    int(job_dictionary["turn_number"]) if job_dictionary is not None else 1,
+                                    1000,
+                                    merged_message_dictionary,
+                                    connection
+                                )
+                        await self.job_task_repository.mark_unfinished_task_list_async(run_id, job_status.value, connection)
+                    last_sequence_number         = await self.job_chunk_repository.get_last_sequence_number_async(run_id, connection)
+                    stored_usage_dictionary_list = await self.job_message_repository.get_usage_dictionary_list_async(run_id, connection)
+                    if usage_dictionary is None:
+                        usage_dictionary = UsageAccumulator.get_usage_dictionary(stored_usage_dictionary_list)
+                    if is_active:
+                        message_count = await self.job_message_repository.get_message_count_async(run_id, connection)
+                        event_count   = await self.job_event_repository.get_event_count_async(run_id, connection)
+                        chunk_count   = await self.job_chunk_repository.get_chunk_count_async(run_id, connection)
+                        task_count    = await self.job_task_repository.get_task_count_async(run_id, connection)
+                        is_updated    = await self.job_repository.update_job_finished_async(
                             run_id,
                             job_status.value,
-                            JobTransfer._get_preview_from_message_list(merged_message_dictionary_list),
+                            error_message,
+                            usage_dictionary,
+                            message_count,
+                            event_count,
+                            last_sequence_number,
+                            chunk_count,
+                            task_count,
                             connection
                         )
+                        if job_dictionary is not None:
+                            await self.chat_thread_repository.update_thread_on_finish_async(
+                                thread_id,
+                                job_dictionary["user_id"],
+                                run_id,
+                                job_status.value,
+                                JobTransfer._get_preview_from_message_list(merged_message_dictionary_list),
+                                connection
+                            )
+        except Exception as flush_exception:
+            # 일괄 flush 실패 = 이번 실행의 청크/메시지 유실.
+            # 실패 상태값만 DB 에 남긴다 (이후 stream 요청 시 원본 질문으로 모델 재호출하여 복구)
+            failure_message = f"CHUNK FLUSH FAILED : {flush_exception}"
+            await self._flush_status_only_async(run_id, failure_message)
+            await self._publish_terminal_async(run_id, JobStatus.FAILED, failure_message, None, 0, 0, 0)
+            return False
         if not is_updated:
             terminal_job_dictionary = await self.job_repository.get_job_async(run_id)
             if terminal_job_dictionary is None or terminal_job_dictionary["status"] not in {JobStatus.COMPLETED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
