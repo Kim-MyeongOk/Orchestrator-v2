@@ -54,6 +54,9 @@ from app.llm.agent.deep_agent_factory  import DeepAgentFactory
 
 from app.orchestrator.service.redis_chunk_buffer import RedisChunkBuffer
 
+from common.cache.redis_stream.redis_client_factory        import RedisClientFactory
+from common.cache.redis_stream.redis_configuration_factory import RedisConfigurationFactory
+
 load_dotenv()
 
 ##################################################
@@ -356,13 +359,9 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
 
     def _get_redis_client(self):
         # 지연 생성 : 디버그 스냅샷 / Run id 청크 버퍼가 공유한다
-        import redis.asyncio as redis_asyncio
+        # 메인 서버와 동일한 공통 팩토리를 써서 비밀번호/타임아웃/재시도 설정을 함께 적용받는다
         if self.redis_client is None:
-            self.redis_client = redis_asyncio.Redis(
-                host = os.getenv("REDIS_HOST", "localhost"),
-                port = int(os.getenv("REDIS_PORT", "6379")),
-                db   = int(os.getenv("REDIS_DATABASE_INDEX", "0"))
-            )
+            self.redis_client = RedisClientFactory.create_client(RedisConfigurationFactory.create_from_environment())
         return self.redis_client
 
     def _get_run_chunk_buffer(self) -> Optional[RedisChunkBuffer]:

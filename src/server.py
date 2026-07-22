@@ -19,6 +19,7 @@ from common.cache.redis_stream.redis_stream_client             import RedisStrea
 from common.identifier.uuid_v7.uuid_v7_generator               import UUIDV7Generator
 from common.config.environment_variable_helper                 import EnvironmentVariableHelper
 from common.cache.redis_stream.redis_client_factory            import RedisClientFactory
+from common.cache.redis_stream.redis_configuration_factory     import RedisConfigurationFactory
 from app.llm.job.job_configuration                             import JobConfiguration
 from app.llm.repository.job_repository                         import JobRepository
 from app.llm.repository.job_message_repository                 import JobMessageRepository
@@ -170,17 +171,7 @@ class ServerApplication:
 
     @staticmethod
     def _get_redis_configuration() -> RedisConfiguration:
-        redis_password = os.getenv("REDIS_PASSWORD")
-        return RedisConfiguration(
-            host                                = os.getenv("REDIS_HOST", "localhost"),
-            port                                = int(os.getenv("REDIS_PORT", "6379")),
-            password                            = redis_password if redis_password else None,
-            database_index                      = int(os.getenv("REDIS_DATABASE_INDEX", "0")),
-            is_cluster                          = EnvironmentVariableHelper.get_boolean("REDIS_IS_CLUSTER", False),
-            socket_timeout_second_count         = float(os.getenv("REDIS_SOCKET_TIMEOUT_SECOND_COUNT", "10.0")),
-            socket_connect_timeout_second_count = float(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT_SECOND_COUNT", "5.0")),
-            command_maximum_retry_count         = int(os.getenv("REDIS_COMMAND_MAXIMUM_RETRY_COUNT", "1"))
-        )
+        return RedisConfigurationFactory.create_from_environment()
 
     @staticmethod
     def _get_model_configuration() -> ModelConfiguration:
