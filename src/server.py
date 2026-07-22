@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 import asyncio
 import uvicorn
 
@@ -11,9 +10,6 @@ if sys.platform == "win32":
 from dotenv                  import load_dotenv
 from fastapi                 import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from typing                  import Optional
-from typing                  import Dict
-from typing                  import Any
 from contextlib              import asynccontextmanager
 from typing                  import AsyncIterator
 from redis.asyncio           import Redis
@@ -21,6 +17,8 @@ from redis.asyncio           import Redis
 from common.database.postgresql.postgresql_pool_manager        import PostgresqlPoolManager
 from common.cache.redis_stream.redis_stream_client             import RedisStreamClient
 from common.identifier.uuid_v7.uuid_v7_generator               import UUIDV7Generator
+from common.config.environment_variable_helper                 import EnvironmentVariableHelper
+from common.cache.redis_stream.redis_client_factory            import RedisClientFactory
 from app.llm.job.job_configuration                             import JobConfiguration
 from app.llm.repository.job_repository                         import JobRepository
 from app.llm.repository.job_message_repository                 import JobMessageRepository
@@ -138,7 +136,7 @@ class ServerApplication:
 
         # 체크포인트 설정 : 활성 시 lifespan 에서 PostgresSaver 를 만들어 그래프를 재조립·교체한다
         # (AsyncPostgresSaver 는 async 컨텍스트가 필요하므로 생성자에서는 비체크포인트 그래프로 시작)
-        self.is_checkpoint_enabled        = ServerApplication._get_boolean("CHECKPOINT_ENABLED", False)
+        self.is_checkpoint_enabled        = EnvironmentVariableHelper.get_boolean("CHECKPOINT_ENABLED", False)
         self.checkpoint_partition_count   = int(os.getenv("CHECKPOINT_PARTITION_COUNT", "8"))
         self.checkpoint_schema_initializer = CheckpointSchemaInitializer(self.postgresql_pool_manager, self.checkpoint_partition_count)
         self.checkpoint_connection_pool   = None  # psycopg AsyncConnectionPool (lifespan 에서 생성/종료)
@@ -157,28 +155,6 @@ class ServerApplication:
         self.application.include_router(self.llm_api_router.get_router())
         self.application.include_router(self.chat_api_router.get_router())
         self.application.include_router(self.orchestrator_api_router.get_router())
-
-    @staticmethod
-    def _get_boolean(environment_variable_name : str, default_value : bool) -> bool:
-        environment_value = os.getenv(environment_variable_name)
-        if environment_value is None:
-            return default_value
-        return environment_value.strip().lower() in {"1", "true", "yes", "on"}
-
-    @staticmethod
-    def _get_optional_integer(environment_variable_name : str) -> Optional[int]:
-        environment_value = os.getenv(environment_variable_name)
-        return int(environment_value) if environment_value not in (None, "") else None
-
-    @staticmethod
-    def _get_optional_dictionary(environment_variable_name : str) -> Optional[Dict[str, Any]]:
-        environment_value = os.getenv(environment_variable_name)
-        if environment_value in (None, ""):
-            return None
-        value = json.loads(environment_value)
-        if not isinstance(value, dict):
-            raise ValueError(f"INVALID ENVIRONMENT JSON OBJECT : {environment_variable_name}")
-        return value
 
     @staticmethod
     def _get_postgresql_configuration() -> PostgresqlConfiguration:
@@ -200,7 +176,7 @@ class ServerApplication:
             port                                = int(os.getenv("REDIS_PORT", "6379")),
             password                            = redis_password if redis_password else None,
             database_index                      = int(os.getenv("REDIS_DATABASE_INDEX", "0")),
-            is_cluster                          = ServerApplication._get_boolean("REDIS_IS_CLUSTER", False),
+            is_cluster                          = EnvironmentVariableHelper.get_boolean("REDIS_IS_CLUSTER", False),
             socket_timeout_second_count         = float(os.getenv("REDIS_SOCKET_TIMEOUT_SECOND_COUNT", "10.0")),
             socket_connect_timeout_second_count = float(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT_SECOND_COUNT", "5.0")),
             command_maximum_retry_count         = int(os.getenv("REDIS_COMMAND_MAXIMUM_RETRY_COUNT", "1"))
@@ -212,7 +188,7 @@ class ServerApplication:
         model_catalog = ModelCatalog.load_default()
         if model_catalog is not None:
             return model_catalog.create_model_configuration(model_catalog.get_default_model_key())
-        default_header_dictionary = ServerApplication._get_optional_dictionary("MODEL_DEFAULT_HEADERS")
+        default_header_dictionary = EnvironmentVariableHelper.get_optional_dictionary("MODEL_DEFAULT_HEADERS")
         if default_header_dictionary is not None and not all(isinstance(field_name, str) and isinstance(field_value, str) for field_name, field_value in default_header_dictionary.items()):
             raise ValueError("INVALID MODEL DEFAULT HEADERS : MODEL_DEFAULT_HEADERS")
         return ModelConfiguration(
@@ -221,13 +197,13 @@ class ServerApplication:
             api_key                   = os.getenv("MODEL_API_KEY"),
             base_url                  = os.getenv("MODEL_BASE_URL"),
             temperature               = float(os.getenv("MODEL_TEMPERATURE", "0.0")),
-            maximum_token_count       = ServerApplication._get_optional_integer("MODEL_MAXIMUM_TOKEN_COUNT"),
+            maximum_token_count       = EnvironmentVariableHelper.get_optional_integer("MODEL_MAXIMUM_TOKEN_COUNT"),
             timeout_second_count      = float(os.getenv("MODEL_TIMEOUT_SECOND_COUNT", "120.0")),
             maximum_retry_count       = int(os.getenv("MODEL_MAXIMUM_RETRY_COUNT", "2")),
             default_header_dictionary = default_header_dictionary,
-            extra_body_dictionary     = ServerApplication._get_optional_dictionary("MODEL_EXTRA_BODY"),
-            reasoning_enabled         = ServerApplication._get_boolean("MODEL_REASONING_ENABLED", False),
-            context_token_count       = ServerApplication._get_optional_integer("MODEL_CONTEXT_TOKEN_COUNT"),
+            extra_body_dictionary     = EnvironmentVariableHelper.get_optional_dictionary("MODEL_EXTRA_BODY"),
+            reasoning_enabled         = EnvironmentVariableHelper.get_boolean("MODEL_REASONING_ENABLED", False),
+            context_token_count       = EnvironmentVariableHelper.get_optional_integer("MODEL_CONTEXT_TOKEN_COUNT"),
             reasoning_effort          = os.getenv("MODEL_REASONING_EFFORT", "").strip() or None
         )
 
@@ -268,16 +244,7 @@ class ServerApplication:
     @staticmethod
     def _create_orchestrator_redis_client() -> Redis:
         # 오케스트레이터 청크 버퍼용 redis.asyncio 클라이언트 (기존 REDIS_* 환경변수 재사용)
-        redis_configuration = ServerApplication._get_redis_configuration()
-        return Redis(
-            host                   = redis_configuration.host,
-            port                   = redis_configuration.port,
-            db                     = redis_configuration.database_index,
-            password               = redis_configuration.password,
-            decode_responses       = True,
-            socket_timeout         = redis_configuration.socket_timeout_second_count,
-            socket_connect_timeout = redis_configuration.socket_connect_timeout_second_count
-        )
+        return RedisClientFactory.create_client(ServerApplication._get_redis_configuration(), decode_responses = True)
 
     @asynccontextmanager
     async def lifespan_async(self, fast_api : FastAPI) -> AsyncIterator[None]:

@@ -35,63 +35,6 @@ class JobChunkRepository:
         return created_at.replace(tzinfo = timezone.utc) if created_at.tzinfo is None else created_at.astimezone(timezone.utc)
 
     @staticmethod
-    async def _insert_chunk_with_connection_async(connection : asyncpg.Connection, chunk_uuid : uuid.UUID, run_id : uuid.UUID, normalized_chunk : NormalizedChunk) -> None:
-        query_text = """
-INSERT INTO llm_job_chunk
-(
-    id,
-    run_id,
-    seq,
-    chunk_type,
-    ns_list,
-    ns_path,
-    task_id,
-    parent_task_id,
-    task_link_type,
-    data,
-    stream_version,
-    schema_version,
-    projection_status,
-    created_at
-)
-VALUES
-(
-    $1,
-    $2,
-    $3,
-    $4,
-    $5,
-    $6,
-    $7,
-    $8,
-    $9,
-    $10,
-    $11,
-    $12,
-    $13,
-    $14
-)
-ON CONFLICT (run_id, seq) DO NOTHING
-"""
-        await connection.execute(
-            query_text,
-            chunk_uuid,
-            run_id,
-            normalized_chunk.sequence,
-            normalized_chunk.chunk_type,
-            normalized_chunk.namespace_list,
-            normalized_chunk.namespace_path,
-            normalized_chunk.task_id,
-            normalized_chunk.parent_task_id,
-            normalized_chunk.task_link_type,
-            normalized_chunk.data_dictionary,
-            normalized_chunk.stream_version,
-            normalized_chunk.schema_version,
-            normalized_chunk.projection_status,
-            JobChunkRepository._get_created_at(normalized_chunk)
-        )
-
-    @staticmethod
     async def _insert_chunk_list_with_connection_async(connection : asyncpg.Connection, chunk_row_list : List[tuple]) -> None:
         # 일괄 적재 : executemany 로 한 번에 밀어 넣는다 (run_id, seq 중복은 무시)
         query_text = """
@@ -129,13 +72,6 @@ ON CONFLICT (run_id, seq) DO NOTHING
     async def _get_last_sequence_number_with_connection_async(connection : asyncpg.Connection, run_id : uuid.UUID) -> int:
         last_sequence_number = await connection.fetchval("SELECT COALESCE(MAX(seq), 0) FROM llm_job_chunk WHERE run_id = $1", run_id)
         return int(last_sequence_number)
-
-    async def insert_chunk_async(self, chunk_uuid : uuid.UUID, run_id : uuid.UUID, normalized_chunk : NormalizedChunk, connection : Optional[asyncpg.Connection] = None) -> None:
-        if connection is not None:
-            await JobChunkRepository._insert_chunk_with_connection_async(connection, chunk_uuid, run_id, normalized_chunk)
-            return
-        async with self.postgresql_pool_manager.get_pool().acquire() as acquired_connection:
-            await JobChunkRepository._insert_chunk_with_connection_async(acquired_connection, chunk_uuid, run_id, normalized_chunk)
 
     async def insert_chunk_list_async(self, chunk_uuid_list : List[uuid.UUID], run_id : uuid.UUID, normalized_chunk_list : List[NormalizedChunk], connection : Optional[asyncpg.Connection] = None) -> None:
         # 종료 시점 일괄 flush 용 : 누적된 청크 전체를 한 번에 적재한다

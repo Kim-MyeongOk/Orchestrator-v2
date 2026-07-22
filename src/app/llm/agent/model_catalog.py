@@ -62,10 +62,6 @@ class ModelCatalog:
         # UI 드롭다운용 : enable=false 모델은 제외한다
         return [model_key for model_key in self.model_info_dictionary.keys() if self.is_model_enabled(model_key)]
 
-    def get_all_model_key_list(self) -> List[str]:
-        # enable 여부와 무관한 전체 목록 (기존 대화방이 참조하는 비활성 모델 해석 등에 사용)
-        return list(self.model_info_dictionary.keys())
-
     def get_default_model_key(self) -> str:
         return self.default_model_key
 

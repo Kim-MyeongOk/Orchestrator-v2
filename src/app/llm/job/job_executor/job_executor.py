@@ -6,7 +6,6 @@ import time
 from typing           import Dict
 from typing           import Any
 from typing           import List
-from asyncpg          import Connection
 from typing           import Optional
 from redis.exceptions import RedisError
 from typing           import Callable

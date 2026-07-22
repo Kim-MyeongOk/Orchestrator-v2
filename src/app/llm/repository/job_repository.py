@@ -50,11 +50,6 @@ RETURNING TRUE
         return bool(is_updated)
 
     @staticmethod
-    async def lock_job_for_chunk_async(connection : asyncpg.Connection, run_id : uuid.UUID) -> bool:
-        status = await connection.fetchval("SELECT status FROM llm_job WHERE run_id = $1 FOR SHARE", run_id)
-        return status in {"pending", "running"}
-
-    @staticmethod
     async def lock_job_for_transfer_async(connection : asyncpg.Connection, run_id : uuid.UUID) -> bool:
         status = await connection.fetchval("SELECT status FROM llm_job WHERE run_id = $1 FOR UPDATE", run_id)
         return status in {"pending", "running"}
@@ -272,9 +267,6 @@ RETURNING TRUE
                 return [JobRepository._convert_record_to_dictionary(record) for record in record_list]
             record_list = await connection.fetch("SELECT * FROM llm_job WHERE thread_id = $1 AND status = 'completed' ORDER BY created_at ASC, run_id ASC", thread_id)
             return [JobRepository._convert_record_to_dictionary(record) for record in record_list]
-
-    async def get_thread_job_list_for_user_async(self, thread_id : uuid.UUID, user_id : uuid.UUID) -> List[Dict[str, Any]]:
-        return await self.get_thread_job_list_async(thread_id = thread_id, user_id = user_id)
 
     async def get_stale_active_job_list_async(self, stale_before : datetime) -> List[Dict[str, Any]]:
         async with self.postgresql_pool_manager.get_pool().acquire() as connection:
