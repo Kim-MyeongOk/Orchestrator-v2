@@ -9,7 +9,8 @@ from typing                import Dict
 from typing                import List
 from typing                import Tuple
 
-from common.cache.redis_stream.redis_configuration import RedisConfiguration
+from common.cache.redis_stream.redis_configuration  import RedisConfiguration
+from common.cache.redis_stream.redis_client_factory import RedisClientFactory
 
 class RedisStreamClient:
     ADD_ACTIVE_JOB_STREAM_SCRIPT = """
@@ -123,16 +124,7 @@ return 0
                 decode_responses             = True
             )
         else:
-            self.redis_client = redis_asyncio.Redis(
-                host                   = self.redis_configuration.host,
-                port                   = self.redis_configuration.port,
-                password               = self.redis_configuration.password,
-                db                     = self.redis_configuration.database_index,
-                socket_timeout         = self.redis_configuration.socket_timeout_second_count,
-                socket_connect_timeout = self.redis_configuration.socket_connect_timeout_second_count,
-                retry                  = Retry(NoBackoff(), self.redis_configuration.command_maximum_retry_count),
-                decode_responses       = True
-            )
+            self.redis_client = RedisClientFactory.create_client(self.redis_configuration, decode_responses = True)
 
     async def ping_async(self) -> bool:
         return bool(await self._get_redis_client().ping())

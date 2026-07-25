@@ -385,7 +385,7 @@ class OpenaiResponsesFormatAdapter:
             projection_list.extend(self._complete_message(message_key_tuple))
         return projection_list
 
-    def _format_tool_call_list(self, message_key_tuple : Tuple[str, str], tool_call_list : List[Dict[str, Any]], is_merged : bool) -> List[Dict[str, Any]]:
+    def _format_tool_call_list(self, message_key_tuple : Tuple[str, str], tool_call_list : List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         projection_list = []
         for default_tool_index, tool_call_dictionary in enumerate(tool_call_list):
             if not isinstance(tool_call_dictionary, dict):
@@ -398,18 +398,6 @@ class OpenaiResponsesFormatAdapter:
             if argument_value is None:
                 argument_value = tool_call_dictionary.get("arguments")
             full_argument_text = OpenaiResponsesFormatAdapter._serialize_argument_value(argument_value)
-            if is_merged:
-                current_argument_text = tool_state_dictionary["arguments"]
-                if full_argument_text.startswith(current_argument_text):
-                    argument_delta = full_argument_text[len(current_argument_text):]
-                elif current_argument_text == full_argument_text:
-                    argument_delta = ""
-                else:
-                    argument_delta = full_argument_text
-                delta_projection = self._append_tool_argument_delta(tool_state_dictionary = tool_state_dictionary, argument_delta = argument_delta)
-                if delta_projection is not None:
-                    projection_list.append(delta_projection)
-                continue
             current_argument_text = tool_state_dictionary["arguments"]
             if current_argument_text and full_argument_text.startswith(current_argument_text):
                 argument_delta = full_argument_text[len(current_argument_text):]
@@ -446,7 +434,7 @@ class OpenaiResponsesFormatAdapter:
                     projection_list.append(added_projection)
         return message_key_tuple, projection_list
 
-    def _format_message(self, ns_path : str, message_dictionary : Dict[str, Any], is_merged : bool) -> List[Dict[str, Any]]:
+    def _format_message(self, ns_path : str, message_dictionary : Dict[str, Any]) -> List[Dict[str, Any]]:
         message_key_tuple, projection_list = self._prepare_message(namespace_path = ns_path, message_dictionary = message_dictionary)
         text_value                         = OpenaiResponsesFormatAdapter._extract_text(message_dictionary.get("content"))
         tool_call_chunk_list               = message_dictionary.get("tool_call_chunk_list") or []
@@ -454,20 +442,13 @@ class OpenaiResponsesFormatAdapter:
         is_complete_message                = OpenaiResponsesFormatAdapter._is_complete_message(message_dictionary)
         message_state_dictionary           = self._message_state_dictionary.get(message_key_tuple)
         if message_state_dictionary is not None:
-            text_delta = text_value
-            if is_merged:
-                current_text = message_state_dictionary["text"]
-                if text_value.startswith(current_text):
-                    text_delta = text_value[len(current_text):]
-                elif current_text == text_value:
-                    text_delta = ""
-            text_delta_projection = self._append_text_delta(message_state_dictionary = message_state_dictionary, text_delta = text_delta)
+            text_delta_projection = self._append_text_delta(message_state_dictionary = message_state_dictionary, text_delta = text_value)
             if text_delta_projection is not None:
                 projection_list.append(text_delta_projection)
         if isinstance(tool_call_chunk_list, list) and tool_call_chunk_list:
-            projection_list.extend(self._format_tool_call_list(message_key_tuple = message_key_tuple, tool_call_list = tool_call_chunk_list, is_merged = is_merged))
+            projection_list.extend(self._format_tool_call_list(message_key_tuple = message_key_tuple, tool_call_list = tool_call_chunk_list))
         elif isinstance(tool_call_list, list) and tool_call_list:
-            projection_list.extend(self._format_tool_call_list(message_key_tuple = message_key_tuple, tool_call_list = tool_call_list, is_merged = is_merged))
+            projection_list.extend(self._format_tool_call_list(message_key_tuple = message_key_tuple, tool_call_list = tool_call_list))
         if is_complete_message:
             projection_list.extend(self._complete_message(message_key_tuple))
         return projection_list
@@ -512,28 +493,7 @@ class OpenaiResponsesFormatAdapter:
         if not isinstance(message_dictionary, dict):
             return projection_list
         namespace_path = OpenaiResponsesFormatAdapter._extract_ns_path(normalized_chunk_dictionary)
-        projection_list.extend(self._format_message(ns_path = namespace_path, message_dictionary = message_dictionary, is_merged = False))
-        return projection_list
-
-    def format_merged_message(self, message_dictionary : Dict[str, Any]) -> List[Dict[str, Any]]:
-        if self._is_ended:
-            return []
-        projection_list        = self.format_start()
-        source_sequence_number = int(message_dictionary.get("seq_last") or 0)
-        self.set_source_sequence_number(source_sequence_number)
-        ns_path                = str(message_dictionary.get("ns_path") or "")
-        projection_list.extend(self._format_message(ns_path = ns_path, message_dictionary = message_dictionary, is_merged = True))
-        return projection_list
-
-    def format_merged_message_added(self, message_dictionary : Dict[str, Any]) -> List[Dict[str, Any]]:
-        if self._is_ended:
-            return []
-        projection_list        = self.format_start()
-        source_sequence_number = int(message_dictionary.get("seq_first") or 0)
-        self.set_source_sequence_number(source_sequence_number)
-        ns_path                = str(message_dictionary.get("ns_path") or "")
-        _message_key_tuple, added_projection_list = self._prepare_message(namespace_path = ns_path, message_dictionary = message_dictionary)
-        projection_list.extend(added_projection_list)
+        projection_list.extend(self._format_message(ns_path = namespace_path, message_dictionary = message_dictionary))
         return projection_list
 
     def format_end(self, status : str, error_message : Optional[str], usage_dictionary : Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:

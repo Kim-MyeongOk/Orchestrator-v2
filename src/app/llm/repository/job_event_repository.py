@@ -85,11 +85,6 @@ ON CONFLICT (run_id, seq) DO NOTHING
             record_list = await connection.fetch("SELECT * FROM llm_job_event WHERE run_id = $1 ORDER BY seq ASC", run_id)
             return [JobEventRepository._convert_record_to_dictionary(record) for record in record_list]
 
-    async def get_event_list_after_sequence_async(self, run_id : uuid.UUID, sequence_number : int) -> List[Dict[str, Any]]:
-        async with self.postgresql_pool_manager.get_pool().acquire() as connection:
-            record_list = await connection.fetch("SELECT * FROM llm_job_event WHERE run_id = $1 AND seq > $2 ORDER BY seq ASC", run_id, sequence_number)
-            return [JobEventRepository._convert_record_to_dictionary(record) for record in record_list]
-
     async def get_event_count_async(self, run_id : uuid.UUID, connection : Optional[asyncpg.Connection] = None) -> int:
         if connection is not None:
             return await JobEventRepository._get_event_count_with_connection_async(connection, run_id)

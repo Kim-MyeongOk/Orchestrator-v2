@@ -158,11 +158,6 @@ SET
             record_list = await connection.fetch("SELECT * FROM llm_job_message WHERE run_id = $1 ORDER BY seq_first ASC", run_id)
             return [JobMessageRepository._convert_record_to_dictionary(record) for record in record_list]
 
-    async def get_message_list_after_sequence_async(self, run_id : uuid.UUID, sequence_number : int) -> List[Dict[str, Any]]:
-        async with self.postgresql_pool_manager.get_pool().acquire() as connection:
-            record_list = await connection.fetch("SELECT * FROM llm_job_message WHERE run_id = $1 AND seq_last > $2 ORDER BY seq_last ASC, seq_first ASC", run_id, sequence_number)
-            return [JobMessageRepository._convert_record_to_dictionary(record) for record in record_list]
-
     async def get_message_count_async(self, run_id : uuid.UUID, connection : Optional[asyncpg.Connection] = None) -> int:
         if connection is not None:
             return await JobMessageRepository._get_message_count_with_connection_async(connection, run_id)
