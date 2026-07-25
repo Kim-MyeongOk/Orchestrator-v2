@@ -13,6 +13,14 @@
     if (isDark) document.documentElement.classList.add("dark");
 })();
 </script>
+<script>
+/* [인증 게이트] 로그인된 사용자가 없으면 앱 렌더링 전에 로그인 페이지로 보낸다. */
+(function () {
+    if (!localStorage.getItem("orchestrator_chat_auth_user_id")) {
+        location.replace("login.html");
+    }
+})();
+</script>
 <style>
     /* 첫 페인트용 크리티컬 배경 (Tailwind 로드 전에도 올바른 배경색 보장) */
     html       { background : #f1f5f9; }
@@ -121,9 +129,13 @@
         <!-- 세션 설정 -->
         <div class="sidebar-content p-4 md:p-5 pt-3 space-y-3 border-t border-slate-200 dark:border-slate-800/70">
             <div>
-                <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">사용자 ID <span class="text-slate-400 dark:text-slate-600">(방 목록이 이 ID 로 저장됨)</span></label>
-                <input id="user-id" type="text" onchange="onUserIdChanged()"
-                       class="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition">
+                <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">로그인 사용자 <span class="text-slate-400 dark:text-slate-600">(이 ID 로만 채팅·방 저장)</span></label>
+                <div class="flex gap-1.5">
+                    <input id="user-id" type="text" readonly
+                           class="flex-1 min-w-0 bg-slate-100 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-600 dark:text-slate-300 focus:outline-none">
+                    <button onclick="logout()" title="로그아웃"
+                            class="shrink-0 px-2.5 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-red-100 dark:hover:bg-red-950/60 text-slate-500 hover:text-red-600 dark:hover:text-red-400 border border-slate-300 dark:border-slate-700 text-xs transition">로그아웃</button>
+                </div>
             </div>
             <div>
                 <label class="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5">모델</label>
@@ -288,23 +300,23 @@ function getApiUrl() { return document.getElementById("api-url").value.trim().re
 
 /* ── 사용자 ID : 방 목록이 서버에 이 ID 기준으로 저장된다 ── */
 
-const USER_ID_STORAGE_KEY = "orchestrator_chat_user_id";
+const USER_ID_STORAGE_KEY      = "orchestrator_chat_user_id";
+const AUTH_USER_ID_STORAGE_KEY = "orchestrator_chat_auth_user_id";   // 로그인 인증된 사용자 ID (login.html 이 저장)
 
 function getUserId() { return document.getElementById("user-id").value.trim() || "anonymous"; }
 
 function initializeUserId() {
-    const storedUserId = localStorage.getItem(USER_ID_STORAGE_KEY) || `user-${crypto.randomUUID().slice(0, 8)}`;
-    localStorage.setItem(USER_ID_STORAGE_KEY, storedUserId);
-    document.getElementById("user-id").value = storedUserId;
+    // 로그인된 사용자 ID 를 채팅 식별자로 사용한다 (없으면 head 인증 게이트가 이미 login.html 로 보냈다)
+    const authUserId = localStorage.getItem(AUTH_USER_ID_STORAGE_KEY) || "";
+    localStorage.setItem(USER_ID_STORAGE_KEY, authUserId);
+    document.getElementById("user-id").value = authUserId;
 }
 
-async function onUserIdChanged() {
-    // 사용자 ID 변경 : 해당 유저의 방 목록을 서버에서 다시 불러온다
-    if (isStreaming) return;
-    localStorage.setItem(USER_ID_STORAGE_KEY, getUserId());
-    await loadRoomsAsync();
-    renderRoomList();
-    renderActiveRoom();
+function logout() {
+    // 로그아웃 : 인증 정보를 지우고 로그인 페이지로 이동한다 (방 목록은 서버에 남아 다음 로그인 시 복원)
+    localStorage.removeItem(AUTH_USER_ID_STORAGE_KEY);
+    localStorage.removeItem(USER_ID_STORAGE_KEY);
+    location.replace("login.html");
 }
 
 /* ── 방 목록 : 서버(chat_room 테이블)가 원본, localStorage 는 오프라인 폴백 캐시 ── */

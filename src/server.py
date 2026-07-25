@@ -53,6 +53,9 @@ from common.identifier.uuid_v7.uuid_v7_generator               import UUIDV7Gene
 from common.config.environment_variable_helper                 import EnvironmentVariableHelper
 from common.cache.redis_stream.redis_client_factory            import RedisClientFactory
 from common.cache.redis_stream.redis_configuration_factory     import RedisConfigurationFactory
+from common.security.password_helper                           import PasswordHelper
+from app.auth.user_schema_initializer                          import UserSchemaInitializer
+from app.auth.user_repository                                  import UserRepository
 from app.llm.job.job_configuration                             import JobConfiguration
 from app.llm.repository.job_repository                         import JobRepository
 from app.llm.repository.job_message_repository                 import JobMessageRepository
@@ -186,6 +189,16 @@ class ThinkTrimmingMiddleware(AgentMiddleware):
 ##################################################
 # 모니터 요청 모델 (pydantic)
 ##################################################
+class RegisterRequest(BaseModel):
+    user_id  : str
+    password : str
+
+
+class LoginRequest(BaseModel):
+    user_id  : str
+    password : str
+
+
 class RoomUpsertRequest(BaseModel):
     user_id          : str
     room_id          : str
@@ -228,6 +241,8 @@ class ServerApplication:
         self.chat_thread_repository  = ChatThreadRepository(self.postgresql_pool_manager)
         self.thread_message_repository = ThreadMessageRepository(self.postgresql_pool_manager)
         self.job_schema_initializer  = JobSchemaInitializer(self.postgresql_pool_manager)
+        self.user_schema_initializer = UserSchemaInitializer(self.postgresql_pool_manager)
+        self.user_repository         = UserRepository(self.postgresql_pool_manager)
         self.job_transfer            = JobTransfer(
             self.postgresql_pool_manager,
             self.redis_stream_client,
@@ -323,6 +338,9 @@ class ServerApplication:
         self.application.include_router(self.llm_api_router.get_router())
         self.application.include_router(self.chat_api_router.get_router())
         self.application.include_router(self.orchestrator_api_router.get_router())
+        # 인증 라우트 (사용자 등록 / 로그인 — user_id + 비밀번호)
+        self.application.add_api_route("/auth/register",               self.register_user_async,       methods = ["POST"])
+        self.application.add_api_route("/auth/login",                  self.login_user_async,          methods = ["POST"])
         # 모니터 라우트 (루트 경로 — Job 라우터와 경로가 겹치지 않는다)
         self.application.add_api_route("/diagnose",                     self.diagnose_thread_async,     methods = ["GET"])
         self.application.add_api_route("/models",                       self.list_models_async,         methods = ["GET"])
@@ -469,6 +487,32 @@ CREATE TABLE IF NOT EXISTS chat_room
 );
 CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, updated_at DESC);
 """)
+
+    ##################################################
+    # 인증 라우트 핸들러 (사용자 등록 / 로그인)
+    ##################################################
+
+    async def register_user_async(self, register_request : RegisterRequest) -> Dict[str, Any]:
+        # 신규 사용자 등록 : user_id 중복이면 409, 유효성 실패면 400
+        user_id  = register_request.user_id.strip()
+        password = register_request.password
+        if not user_id or not password:
+            raise HTTPException(status_code = 400, detail = "USER ID AND PASSWORD ARE REQUIRED")
+        if len(password) < 4:
+            raise HTTPException(status_code = 400, detail = "PASSWORD TOO SHORT : MINIMUM 4 CHARACTERS")
+        password_hash = PasswordHelper.hash_password(password)
+        is_created    = await self.user_repository.create_user_async(user_id, password_hash)
+        if not is_created:
+            raise HTTPException(status_code = 409, detail = f"USER ALREADY EXISTS : {user_id}")
+        return {"user_id" : user_id, "status" : "registered"}
+
+    async def login_user_async(self, login_request : LoginRequest) -> Dict[str, Any]:
+        # 로그인 검증 : user_id 없음/비밀번호 불일치는 동일하게 401 (계정 존재 여부 노출 방지)
+        user_id     = login_request.user_id.strip()
+        stored_hash = await self.user_repository.get_password_hash_async(user_id)
+        if stored_hash is None or not PasswordHelper.verify_password(login_request.password, stored_hash):
+            raise HTTPException(status_code = 401, detail = "INVALID USER ID OR PASSWORD")
+        return {"user_id" : user_id, "status" : "ok"}
 
     ##################################################
     # 모니터 라우트 핸들러
@@ -723,6 +767,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
         await self.postgresql_pool_manager.open_async()
         try:
             await self.job_schema_initializer.initialize_schema_async()
+            await self.user_schema_initializer.initialize_schema_async()
             await self._initialize_checkpointer_async()
             await self.redis_stream_client.open_async()
             await self.redis_stream_client.ping_async()
