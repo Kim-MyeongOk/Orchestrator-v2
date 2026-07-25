@@ -460,6 +460,7 @@ function applyDeveloperMode(isEnabled) {
     toggleSwitch.classList.toggle("dark:bg-slate-700",  !isEnabled);   // 다크 변형이 인디고를 덮지 않게 함께 토글
     toggleSwitch.querySelector(".developer-toggle-knob").style.transform = isEnabled ? "translateX(16px)" : "translateX(0)";
     updateDebugPanelVisibility(isEnabled);   // 디버그 패널(하단)도 개발자 모드에 연동
+    refreshAllCompletedMetaLines();          // 완료된 답변 메타라인을 모드에 맞춰 재렌더 (상대 시간 ↔ 절대 시각)
 }
 
 function toggleDeveloperMode() {
@@ -469,6 +470,56 @@ function toggleDeveloperMode() {
 }
 
 function isDeveloperModeEnabled() { return !document.getElementById("developer-panel").classList.contains("hidden"); }
+
+/* ══════════════════ 답변 완료 시각 표시 (상대 시간 / 개발자 모드 절대 시각) ══════════════════ */
+
+function formatRelativeTime(completedAtMs) {
+    // 답변 완료 시점 기준 상대 시간 : 지금 / N분 전 / N시간 전 / N일 전 / 지난 주 / N주 전 / N개월 전 / N년 전
+    const diffSecond = Math.max(0, Math.floor((Date.now() - completedAtMs) / 1000));
+    const diffMinute = Math.floor(diffSecond / 60);
+    const diffHour   = Math.floor(diffMinute / 60);
+    const diffDay    = Math.floor(diffHour   / 24);
+    const diffWeek   = Math.floor(diffDay    / 7);
+    const diffMonth  = Math.floor(diffDay    / 30);
+    const diffYear   = Math.floor(diffDay    / 365);
+    if (diffYear   >= 1)  return `${diffYear}년 전`;
+    if (diffMonth  >= 1)  return `${diffMonth}개월 전`;
+    if (diffDay    >= 14) return `${diffWeek}주 전`;
+    if (diffDay    >= 7)  return "지난 주";
+    if (diffDay    >= 1)  return `${diffDay}일 전`;
+    if (diffHour   >= 1)  return `${diffHour}시간 전`;
+    if (diffMinute >= 1)  return `${diffMinute}분 전`;
+    return "지금";
+}
+
+function formatFullTimestamp(completedAtMs) {
+    // 개발자 모드용 절대 시각(밀리초까지) : 2026-07-25 18:53:40.000
+    const dateValue = new Date(completedAtMs);
+    const pad = (value, size = 2) => String(value).padStart(size, "0");
+    return `${dateValue.getFullYear()}-${pad(dateValue.getMonth() + 1)}-${pad(dateValue.getDate())} ${pad(dateValue.getHours())}:${pad(dateValue.getMinutes())}:${pad(dateValue.getSeconds())}.${pad(dateValue.getMilliseconds(), 3)}`;
+}
+
+function renderCompletedMetaLine(metaLineElement) {
+    // 완료된 답변의 메타라인을 현재 모드에 맞춰 렌더한다.
+    //  - 개발자 모드 : 절대 시각(ms) + 경과·토큰 메타
+    //  - 일반 모드   : 상대 시간
+    const completedAtMs = Number(metaLineElement.dataset.completedAt);
+    if (!completedAtMs) return;
+    metaLineElement.classList.remove("hidden");
+    if (isDeveloperModeEnabled()) {
+        const tokenText = `⏱ ${metaLineElement.dataset.elapsed}s · 생각 ${metaLineElement.dataset.reasoningTokens} 토큰 · 응답 ${metaLineElement.dataset.answerTokens} 토큰`;
+        metaLineElement.textContent = `${formatFullTimestamp(completedAtMs)} · ${tokenText}`;
+    } else {
+        metaLineElement.textContent = formatRelativeTime(completedAtMs);
+    }
+}
+
+function refreshAllCompletedMetaLines() {
+    // 상대 시간 경과 갱신 + 개발자 모드 전환 시 전체 메타라인 재렌더
+    document.querySelectorAll(".meta-line[data-completed-at]").forEach(renderCompletedMetaLine);
+}
+
+setInterval(refreshAllCompletedMetaLines, 30000);   // 30초마다 상대 시간 갱신
 
 /* ══════════════════ 패널 레이아웃 : 리사이즈 + 접기 (상태 영속화) ══════════════════ */
 
@@ -741,31 +792,39 @@ async function copyTextToClipboard(copyText, copyButton) {
 const COPY_ICON_SVG  = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10"></path></svg>`;
 const CHECK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><path d="M20 6 9 17l-5-5"></path></svg>`;
 
-function createAnswerCopyRow(answerText) {
-    // 완료된 답변 하단의 복사 버튼 행 : 답변 원문(마크다운 소스)을 클립보드로 복사한다 (아이콘 버튼 + 툴팁)
-    const actionRow = document.createElement("div");
-    actionRow.className = "flex items-center mt-1 px-1";
+function createAnswerCopyButton(answerText) {
+    // 완료된 답변의 복사 아이콘 버튼 : 답변 원문(마크다운 소스)을 클립보드로 복사한다.
+    // 툴팁은 버튼 "위"에 뜨는 커스텀 툴팁을 쓴다 (네이티브 title 은 커서 아래에 그려져 가려지므로 사용하지 않음)
+    const wrapper = document.createElement("span");
+    wrapper.className = "group relative shrink-0 inline-flex";
+
     const copyButton = document.createElement("button");
     copyButton.type      = "button";
-    copyButton.title     = "메시지 복사";
     copyButton.setAttribute("aria-label", "메시지 복사");
-    copyButton.className  = "answer-copy-button w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 dark:text-slate-500 hover:text-indigo-500 dark:hover:text-indigo-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition";
+    copyButton.className  = "answer-copy-button w-5 h-5 rounded flex items-center justify-center text-slate-400 dark:text-slate-500 hover:text-indigo-500 dark:hover:text-indigo-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition";
     copyButton.innerHTML  = COPY_ICON_SVG;
-    copyButton.onclick    = async (event) => {
+
+    const tooltip = document.createElement("span");
+    tooltip.className   = "answer-copy-tooltip pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2 py-1 rounded-md bg-slate-800 dark:bg-slate-700 text-white text-[11px] whitespace-nowrap shadow-lg opacity-0 group-hover:opacity-100 transition z-20";
+    tooltip.textContent = "메시지 복사";
+
+    copyButton.onclick = async (event) => {
         event.stopPropagation();
         await writeTextToClipboard(answerText);
-        // 클릭 피드백 : 아이콘을 초록 체크로 잠시 바꾼다
+        // 클릭 피드백 : 아이콘을 초록 체크로, 툴팁 문구를 "복사됨"으로 잠시 바꾼다
         copyButton.innerHTML = CHECK_ICON_SVG;
-        copyButton.title     = "복사됨";
         copyButton.classList.add("text-emerald-500", "dark:text-emerald-400");
+        tooltip.textContent = "복사됨";
         setTimeout(() => {
             copyButton.innerHTML = COPY_ICON_SVG;
-            copyButton.title     = "메시지 복사";
             copyButton.classList.remove("text-emerald-500", "dark:text-emerald-400");
+            tooltip.textContent = "메시지 복사";
         }, 1500);
     };
-    actionRow.appendChild(copyButton);
-    return actionRow;
+
+    wrapper.appendChild(copyButton);
+    wrapper.appendChild(tooltip);
+    return wrapper;
 }
 
 function createRequestStatusBadge(logEntry) {
@@ -1253,7 +1312,7 @@ function appendAgentBubble() {
     const row = document.createElement("div");
     row.className = "flex justify-start bubble-enter";
     // 주의 : 답변 영역은 whitespace-pre-wrap 이므로 태그 사이에 개행/들여쓰기를 넣으면 여백으로 렌더링된다
-    row.innerHTML = `<div class="flex flex-col items-start max-w-[78%] md:max-w-[65%]"><div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700/60 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed shadow w-fit min-w-0"><details class="reasoning-details hidden mb-1.5 -mx-1"><summary class="cursor-pointer select-none text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition px-1">&#129300; 생각 과정 <span class="reasoning-status text-slate-400 dark:text-slate-600"></span></summary><div class="reasoning-text chat-scroll whitespace-pre-wrap text-[11px] leading-relaxed text-slate-500 bg-slate-100 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg px-2.5 py-2 mt-1 max-h-36 overflow-y-auto"></div></details><span class="typing-indicator inline-flex gap-1 items-center py-1"><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span></span><span class="retry-notice hidden text-[11px] text-amber-600 dark:text-amber-400 italic"></span><span class="agent-text whitespace-pre-wrap"></span></div><div class="meta-line hidden text-[11px] text-slate-500 dark:text-slate-600 mt-1 px-1 font-mono"></div></div>`;
+    row.innerHTML = `<div class="flex flex-col items-start max-w-[78%] md:max-w-[65%]"><div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700/60 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed shadow w-fit min-w-0"><details class="reasoning-details hidden mb-1.5 -mx-1"><summary class="cursor-pointer select-none text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition px-1">&#129300; 생각 과정 <span class="reasoning-status text-slate-400 dark:text-slate-600"></span></summary><div class="reasoning-text chat-scroll whitespace-pre-wrap text-[11px] leading-relaxed text-slate-500 bg-slate-100 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg px-2.5 py-2 mt-1 max-h-36 overflow-y-auto"></div></details><span class="typing-indicator inline-flex gap-1 items-center py-1"><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span><span class="typing-dot w-1.5 h-1.5 rounded-full bg-slate-400"></span></span><span class="retry-notice hidden text-[11px] text-amber-600 dark:text-amber-400 italic"></span><span class="agent-text whitespace-pre-wrap"></span></div><div class="agent-footer flex items-center gap-1.5 mt-1 px-1 min-h-5"><div class="meta-line hidden text-[11px] text-slate-500 dark:text-slate-600 font-mono"></div></div></div>`;
     messageFeed.appendChild(row);
     scrollFeedToBottom();
     const reasoningDetails = row.querySelector(".reasoning-details");
@@ -1266,14 +1325,27 @@ function appendAgentBubble() {
     let liveTimerId          = null;
     let reasoningTokenCount  = 0;
     let answerTokenCount     = 0;
+    let completedAtMs        = null;   // 답변 완료 시각(epoch ms) — 완료 후 상대 시간/절대 시각 표시에 사용
+    let completedElapsedText = null;   // 완료 시점의 경과 시간 텍스트 (개발자 모드 메타에 고정 표시)
 
     const formatElapsedSeconds = () => liveStartedAt === null ? "0.0" : ((performance.now() - liveStartedAt) / 1000).toFixed(1);
     const renderMetaLine = () => {
+        // 진행 중 : 경과 시간 + 토큰 수 라이브 표시
         metaLine.classList.remove("hidden");
         metaLine.textContent = `⏱ ${formatElapsedSeconds()}s · 생각 ${reasoningTokenCount} 토큰 · 응답 ${answerTokenCount} 토큰`;
         if (!reasoningDetails.classList.contains("hidden") && reasoningDetails.open) {
             row.querySelector(".reasoning-status").textContent = `(생각 중… ${formatElapsedSeconds()}s · ${reasoningTokenCount} 토큰)`;
         }
+    };
+    const recordCompletion = () => {
+        // 답변 완료 시각을 메타라인 dataset 에 기록하고 현재 모드에 맞춰 렌더한다 (이후 30초 주기 상대 시간 갱신 대상)
+        completedAtMs        = Date.now();
+        completedElapsedText = formatElapsedSeconds();
+        metaLine.dataset.completedAt     = String(completedAtMs);
+        metaLine.dataset.elapsed         = completedElapsedText;
+        metaLine.dataset.reasoningTokens = String(reasoningTokenCount);
+        metaLine.dataset.answerTokens    = String(answerTokenCount);
+        renderCompletedMetaLine(metaLine);
     };
     const clearRetryNotice = () => { retryNotice.classList.add("hidden"); retryNotice.textContent = ""; };
 
@@ -1284,12 +1356,22 @@ function appendAgentBubble() {
             liveTimerId   = setInterval(renderMetaLine, 100);
             renderMetaLine();
         },
-        getMeta : () => ({ elapsed_second_text : formatElapsedSeconds(), reasoning_token_count : reasoningTokenCount, answer_token_count : answerTokenCount }),
+        getMeta : () => ({ elapsed_second_text : completedElapsedText !== null ? completedElapsedText : formatElapsedSeconds(), reasoning_token_count : reasoningTokenCount, answer_token_count : answerTokenCount, completed_at : completedAtMs }),
         setStoredMeta : (storedMeta) => {
-            // 방 전환 복원용 : 고정 메타라인만 표시 (타이머 없음)
+            // 방 전환 복원용 : 저장된 완료 시각 기준으로 상대 시간(개발자 모드는 절대 시각)을 표시한다
             if (!storedMeta) return;
-            metaLine.classList.remove("hidden");
-            metaLine.textContent = `⏱ ${storedMeta.elapsed_second_text}s · 생각 ${storedMeta.reasoning_token_count} 토큰 · 응답 ${storedMeta.answer_token_count} 토큰`;
+            if (storedMeta.completed_at) {
+                metaLine.dataset.completedAt     = String(storedMeta.completed_at);
+                metaLine.dataset.elapsed         = storedMeta.elapsed_second_text;
+                metaLine.dataset.reasoningTokens = String(storedMeta.reasoning_token_count);
+                metaLine.dataset.answerTokens    = String(storedMeta.answer_token_count);
+                renderCompletedMetaLine(metaLine);
+            } else {
+                // 레거시(완료 시각 미저장) : 기존 토큰 메타만 고정 표시
+                delete metaLine.dataset.completedAt;
+                metaLine.classList.remove("hidden");
+                metaLine.textContent = `⏱ ${storedMeta.elapsed_second_text}s · 생각 ${storedMeta.reasoning_token_count} 토큰 · 응답 ${storedMeta.answer_token_count} 토큰`;
+            }
         },
         appendReasoning : (chunkText) => {
             // 생각 과정 실시간 누적 : 첫 조각에서 섹션을 펼치고, 내부 스크롤을 따라간다 (대기 지루함 해소)
@@ -1337,13 +1419,14 @@ function appendAgentBubble() {
             scrollFeedToBottom();
         },
         finalize : () => {
-            // 스트림 종료 시 : 타이머 정지·메타 고정 + 후행 공백 제거 + 빈 응답이면 플레이스홀더 표시
-            if (liveTimerId !== null) { clearInterval(liveTimerId); renderMetaLine(); liveTimerId = null; }
+            // 스트림 종료 시 : 타이머 정지 + 완료 시각 기록 + 후행 공백 제거 + 빈 응답이면 플레이스홀더 표시
+            if (liveTimerId !== null) { clearInterval(liveTimerId); liveTimerId = null; }
             clearRetryNotice();
             const indicator = row.querySelector(".typing-indicator");
             if (indicator) indicator.remove();
             reasoningDetails.open = false;
             row.querySelector(".reasoning-status").textContent = "";
+            recordCompletion();   // 완료 시각 기록 + 메타라인 렌더 (일반: 상대 시간 / 개발자: 절대 시각 + 토큰)
             const agentText = row.querySelector(".agent-text");
             const rawAnswerText = agentText.textContent.replace(/\s+$/, "");   // 저장·반환용 원문(마크다운 소스)
             if (rawAnswerText === "") {
@@ -1355,10 +1438,10 @@ function appendAgentBubble() {
             agentText.classList.remove("whitespace-pre-wrap");   // 마크다운은 자체 여백을 쓰므로 pre-wrap 해제
             agentText.classList.add("md-body");
             agentText.innerHTML = renderMarkdownToHtml(rawAnswerText);
-            // 답변 하단에 복사 버튼을 단다 (finalize 가 다시 불려도 중복 생성하지 않는다)
-            const answerColumn = row.firstElementChild;
-            if (answerColumn && !answerColumn.querySelector(".answer-copy-button")) {
-                answerColumn.appendChild(createAnswerCopyRow(rawAnswerText));
+            // 복사 버튼을 시간(메타라인)과 같은 행(.agent-footer)의 맨 앞에 둔다 (finalize 재호출 시 중복 방지)
+            const answerFooter = row.querySelector(".agent-footer");
+            if (answerFooter && !answerFooter.querySelector(".answer-copy-button")) {
+                answerFooter.insertBefore(createAnswerCopyButton(rawAnswerText), answerFooter.firstChild);
             }
             return rawAnswerText;   // room.messages 에는 원문(마크다운)을 저장한다
         },
