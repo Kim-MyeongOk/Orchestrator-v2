@@ -36,7 +36,7 @@
 
             <div>
                 <label class="block text-xs text-zinc-400 mb-1">백엔드 API URL</label>
-                <input id="api-url" type="text" value="http://localhost:8002"
+                <input id="api-url" type="text" value="http://localhost:8000"
                        class="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 transition-colors">
             </div>
 
@@ -257,7 +257,7 @@ async function startStream() {
 }
 
 /* ══════════════════ 초기화 ══════════════════ */
-appendLog("대시보드 준비 완료. 백엔드 : python src/think_bottleneck_monitor.py (포트 8002)");
+appendLog("대시보드 준비 완료. 백엔드 : python src/server.py (포트 8000)");
 </script>
 </body>
 </html>

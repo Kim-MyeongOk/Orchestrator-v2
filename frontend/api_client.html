@@ -87,25 +87,25 @@
 <script>
 /* ══════════════════ 엔드포인트 카탈로그 ══════════════════ */
 
-// 이 페이지는 모니터 백엔드(:8002)가 직접 서빙한다. 메인 서버(:8000)는 같은 호스트의 8000 포트로 추정한다.
+// 통합 백엔드(server.py, 기본 :8002)가 모니터 라우트와 Job(/llm, /api/v1) 라우트를 함께 서빙한다.
 // (file:// 로 직접 연 경우 origin 이 "null" 이므로 localhost 기본값으로 폴백)
-const MONITOR_BASE_URL = window.location.origin.startsWith("http") ? window.location.origin : "http://localhost:8002";
-const MAIN_BASE_URL    = (() => { const mainUrl = new URL(MONITOR_BASE_URL); mainUrl.port = "8000"; return mainUrl.origin; })();
-const DEV_USER_ID      = "11111111-1111-4111-8111-111111111111";   // 메인 서버 API 의 X-User-Id 헤더 기본값 (UUID 형식 필수)
+const MONITOR_BASE_URL = window.location.origin.startsWith("http") ? window.location.origin : "http://localhost:8000";
+const MAIN_BASE_URL    = MONITOR_BASE_URL;   // 통합 이후 Job API 도 동일 오리진에서 서빙된다
+const DEV_USER_ID      = "11111111-1111-4111-8111-111111111111";   // Job API 의 X-User-Id 헤더 기본값 (UUID 형식 필수)
 document.getElementById("base-url-label").textContent = `monitor ${MONITOR_BASE_URL} · main ${MAIN_BASE_URL}`;
 
 const ENDPOINT_CATALOG = [
-    /* ── 모니터 앱 (:8002) — 채팅 UI 백엔드 ── */
-    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "POST",   path : "/stream",                       description : "LangGraph 스트리밍 대화 (NDJSON)", isStream : true,
+    /* ── 모니터 앱 (:8000) — 채팅 UI 백엔드 ── */
+    { group : "Monitor · :8000", baseUrl : MONITOR_BASE_URL, method : "POST",   path : "/stream",                       description : "LangGraph 스트리밍 대화 (NDJSON)", isStream : true,
       bodyExample : { thread_id : crypto.randomUUID(), message : "1 더하기 1은? 숫자만 답해.", model : null, reasoning_effort : null, include_reasoning : true } },
-    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/models",                       description : "사용 가능 모델 목록" },
-    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/diagnose",                     description : "체크포인트 진단 (로드시간/메시지 수/생각 크기)", params : { thread_id : "" } },
-    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/rooms",                        description : "유저별 채팅방 목록", params : { user_id : "" } },
-    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "POST",   path : "/rooms",                        description : "채팅방 생성/갱신 (upsert)",
+    { group : "Monitor · :8000", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/models",                       description : "사용 가능 모델 목록" },
+    { group : "Monitor · :8000", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/diagnose",                     description : "체크포인트 진단 (로드시간/메시지 수/생각 크기)", params : { thread_id : "" } },
+    { group : "Monitor · :8000", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/rooms",                        description : "유저별 채팅방 목록", params : { user_id : "" } },
+    { group : "Monitor · :8000", baseUrl : MONITOR_BASE_URL, method : "POST",   path : "/rooms",                        description : "채팅방 생성/갱신 (upsert)",
       bodyExample : { user_id : "dev-test", room_id : crypto.randomUUID(), thread_id : crypto.randomUUID(), title : "API 테스트 방", model : null, reasoning_effort : null } },
-    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "DELETE", path : "/rooms/{room_id}",              description : "채팅방 삭제 (소유자만)", params : { user_id : "" } },
-    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/threads/{thread_id}/messages", description : "체크포인트에서 대화 복원" },
-    { group : "Monitor · :8002", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/redis/{thread_id}",            description : "스레드 관련 Redis 캐시 스냅샷" },
+    { group : "Monitor · :8000", baseUrl : MONITOR_BASE_URL, method : "DELETE", path : "/rooms/{room_id}",              description : "채팅방 삭제 (소유자만)", params : { user_id : "" } },
+    { group : "Monitor · :8000", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/threads/{thread_id}/messages", description : "체크포인트에서 대화 복원" },
+    { group : "Monitor · :8000", baseUrl : MONITOR_BASE_URL, method : "GET",    path : "/redis/{thread_id}",            description : "스레드 관련 Redis 캐시 스냅샷" },
 
     /* ── 메인 서버 (:8000) — LLM Job 파이프라인 (X-User-Id 헤더 필수) ── */
     { group : "Main · :8000 LLM Jobs", baseUrl : MAIN_BASE_URL, method : "POST",   path : "/llm/chat",                  description : "동기 채팅 (SSE 스트림, job 자동 생성)", isStream : true, headers : { "X-User-Id" : DEV_USER_ID },
