@@ -715,8 +715,8 @@ function buildCurlCommand(logEntry) {
     return commandPartList.join(" \\\n");
 }
 
-async function copyTextToClipboard(copyText, copyButton) {
-    // 원클릭 복사 + 버튼 피드백 (클립보드 API 불가 환경은 임시 textarea 폴백)
+async function writeTextToClipboard(copyText) {
+    // 클립보드 쓰기 (클립보드 API 불가 환경은 임시 textarea 폴백)
     try {
         await navigator.clipboard.writeText(copyText);
     } catch (_ignored) {
@@ -727,9 +727,45 @@ async function copyTextToClipboard(copyText, copyButton) {
         document.execCommand("copy");
         fallbackTextarea.remove();
     }
+}
+
+async function copyTextToClipboard(copyText, copyButton) {
+    // 원클릭 복사 + 텍스트 라벨 피드백
+    await writeTextToClipboard(copyText);
     const originalLabel    = copyButton.textContent;
     copyButton.textContent = "복사됨 ✓";
     setTimeout(() => { copyButton.textContent = originalLabel; }, 1500);
+}
+
+// 복사 아이콘(두 겹 사각형) / 완료 체크 아이콘
+const COPY_ICON_SVG  = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10"></path></svg>`;
+const CHECK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><path d="M20 6 9 17l-5-5"></path></svg>`;
+
+function createAnswerCopyRow(answerText) {
+    // 완료된 답변 하단의 복사 버튼 행 : 답변 원문(마크다운 소스)을 클립보드로 복사한다 (아이콘 버튼 + 툴팁)
+    const actionRow = document.createElement("div");
+    actionRow.className = "flex items-center mt-1 px-1";
+    const copyButton = document.createElement("button");
+    copyButton.type      = "button";
+    copyButton.title     = "메시지 복사";
+    copyButton.setAttribute("aria-label", "메시지 복사");
+    copyButton.className  = "answer-copy-button w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 dark:text-slate-500 hover:text-indigo-500 dark:hover:text-indigo-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition";
+    copyButton.innerHTML  = COPY_ICON_SVG;
+    copyButton.onclick    = async (event) => {
+        event.stopPropagation();
+        await writeTextToClipboard(answerText);
+        // 클릭 피드백 : 아이콘을 초록 체크로 잠시 바꾼다
+        copyButton.innerHTML = CHECK_ICON_SVG;
+        copyButton.title     = "복사됨";
+        copyButton.classList.add("text-emerald-500", "dark:text-emerald-400");
+        setTimeout(() => {
+            copyButton.innerHTML = COPY_ICON_SVG;
+            copyButton.title     = "메시지 복사";
+            copyButton.classList.remove("text-emerald-500", "dark:text-emerald-400");
+        }, 1500);
+    };
+    actionRow.appendChild(copyButton);
+    return actionRow;
 }
 
 function createRequestStatusBadge(logEntry) {
@@ -1319,6 +1355,11 @@ function appendAgentBubble() {
             agentText.classList.remove("whitespace-pre-wrap");   // 마크다운은 자체 여백을 쓰므로 pre-wrap 해제
             agentText.classList.add("md-body");
             agentText.innerHTML = renderMarkdownToHtml(rawAnswerText);
+            // 답변 하단에 복사 버튼을 단다 (finalize 가 다시 불려도 중복 생성하지 않는다)
+            const answerColumn = row.firstElementChild;
+            if (answerColumn && !answerColumn.querySelector(".answer-copy-button")) {
+                answerColumn.appendChild(createAnswerCopyRow(rawAnswerText));
+            }
             return rawAnswerText;   // room.messages 에는 원문(마크다운)을 저장한다
         },
         markError : (errorText, onManualRetry = null) => {
