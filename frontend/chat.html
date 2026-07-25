@@ -302,8 +302,22 @@ function getApiUrl() { return document.getElementById("api-url").value.trim().re
 
 const USER_ID_STORAGE_KEY      = "orchestrator_chat_user_id";
 const AUTH_USER_ID_STORAGE_KEY = "orchestrator_chat_auth_user_id";   // 로그인 인증된 사용자 ID (login.html 이 저장)
+const AUTH_TOKEN_STORAGE_KEY   = "orchestrator_chat_auth_token";     // 인증 토큰 (Authorization: Bearer 로 전송)
 
 function getUserId() { return document.getElementById("user-id").value.trim() || "anonymous"; }
+
+function getAuthToken() { return localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || ""; }
+
+async function authFetch(url, init = {}) {
+    // 인증 토큰을 Authorization 헤더로 실어 요청한다. 401(만료·무효) 이면 로그아웃 처리.
+    const headerDictionary = Object.assign({}, init.headers || {}, { "Authorization" : `Bearer ${getAuthToken()}` });
+    const response = await fetch(url, Object.assign({}, init, { headers : headerDictionary }));
+    if (response.status === 401) {
+        logout();
+        throw new Error("UNAUTHORIZED");
+    }
+    return response;
+}
 
 function initializeUserId() {
     // 로그인된 사용자 ID 를 채팅 식별자로 사용한다 (없으면 head 인증 게이트가 이미 login.html 로 보냈다)
@@ -315,6 +329,7 @@ function initializeUserId() {
 function logout() {
     // 로그아웃 : 인증 정보를 지우고 로그인 페이지로 이동한다 (방 목록은 서버에 남아 다음 로그인 시 복원)
     localStorage.removeItem(AUTH_USER_ID_STORAGE_KEY);
+    localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
     localStorage.removeItem(USER_ID_STORAGE_KEY);
     location.replace("login.html");
 }
@@ -328,7 +343,7 @@ function saveRooms() {
 async function syncRoomToServerAsync(room) {
     // 방 메타(제목/모델/생각 정도/Thread) 를 서버에 upsert 한다 — 실패해도 로컬 동작은 계속 (다음 변경 때 재시도)
     try {
-        await fetch(`${getApiUrl()}/rooms`, {
+        await authFetch(`${getApiUrl()}/rooms`, {
             method  : "POST",
             headers : { "Content-Type" : "application/json" },
             body    : JSON.stringify({ user_id : getUserId(), room_id : room.roomId, thread_id : room.threadId, title : room.title, model : room.model || null, reasoning_effort : room.reasoningEffort || null })
@@ -341,7 +356,7 @@ async function loadRoomsAsync() {
     let cachedState = null;
     try { cachedState = JSON.parse(localStorage.getItem(ROOM_STORAGE_KEY)); } catch (_ignored) {}
     try {
-        const response = await fetch(`${getApiUrl()}/rooms?user_id=${encodeURIComponent(getUserId())}`);
+        const response = await authFetch(`${getApiUrl()}/rooms`);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const serverRoomList = (await response.json()).rooms;
         if (serverRoomList.length === 0 && Array.isArray(cachedState?.roomList) && cachedState.roomList.length > 0 && (cachedState.userId === undefined || cachedState.userId === getUserId())) {
@@ -422,7 +437,7 @@ function deleteRoom(event, roomId) {
     event.stopPropagation();
     if (isStreaming) return;
     roomList = roomList.filter(room => room.roomId !== roomId);
-    fetch(`${getApiUrl()}/rooms/${roomId}?user_id=${encodeURIComponent(getUserId())}`, { method : "DELETE" }).catch(() => {});
+    authFetch(`${getApiUrl()}/rooms/${roomId}`, { method : "DELETE" }).catch(() => {});
     if (roomList.length === 0) { createRoom(); return; }
     if (activeRoomId === roomId) activeRoomId = roomList[0].roomId;
     saveRooms();
@@ -614,7 +629,7 @@ async function refreshRedisTabAsync() {
     if (!room) return;
     const redisContainer = document.getElementById("debug-tab-redis");
     try {
-        const response = await fetch(`${getApiUrl()}/redis/${encodeURIComponent(room.threadId)}`);
+        const response = await authFetch(`${getApiUrl()}/redis/${encodeURIComponent(room.threadId)}`);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         renderRedisTab(await response.json());
         document.getElementById("debug-refresh-status").textContent = `갱신 ${new Date().toLocaleTimeString("ko-KR", { hour12 : false })}`;
@@ -971,7 +986,7 @@ function renderActiveRoom() {
 async function restoreRoomMessagesAsync(room) {
     // 체크포인트 → 표시용 메시지 복원 : 완료 후 해당 방이 여전히 활성 상태면 다시 렌더링한다
     try {
-        const response = await fetch(`${getApiUrl()}/threads/${encodeURIComponent(room.threadId)}/messages`);
+        const response = await authFetch(`${getApiUrl()}/threads/${encodeURIComponent(room.threadId)}/messages`);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         room.messages = (await response.json()).messages.map(serverMessage => ({ role : serverMessage.role, text : serverMessage.text, reasoning : serverMessage.reasoning || "" }));
     } catch (error) {
@@ -1180,7 +1195,7 @@ async function submitEditedUserMessageAsync(userMessageIndex, newText) {
 
     // ① 서버 체크포인트에서 이 질문 이후를 제거한다 (모델이 삭제된 대화를 기억하지 않도록)
     try {
-        const response = await fetch(`${getApiUrl()}/threads/${encodeURIComponent(room.threadId)}/truncate`, {
+        const response = await authFetch(`${getApiUrl()}/threads/${encodeURIComponent(room.threadId)}/truncate`, {
             method  : "POST",
             headers : { "Content-Type" : "application/json" },
             body    : JSON.stringify({ keep_human_message_count : userMessageIndex })   // 이 질문 앞까지만 유지
@@ -1425,7 +1440,7 @@ async function executeStreamTurnAsync(room, message) {
     let attemptCount = 0;
     while (true) {
         try {
-            const response = await fetch(`${apiUrl}/stream`, {
+            const response = await authFetch(`${apiUrl}/stream`, {
                 method  : "POST",
                 headers : { "Content-Type" : "application/json" },
                 body    : JSON.stringify({ thread_id : room.threadId, message : message, model : room.model || null, reasoning_effort : room.reasoningEffort || null, include_reasoning : true }),

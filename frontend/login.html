@@ -77,6 +77,7 @@
 /* 통합 백엔드(server.py, 기본 :8000)에 인증 요청을 보낸다. file:// 로 열면 localhost:8000 폴백. */
 const API_BASE = location.origin.startsWith("http") ? location.origin : "http://localhost:8000";
 const AUTH_USER_ID_STORAGE_KEY = "orchestrator_chat_auth_user_id";
+const AUTH_TOKEN_STORAGE_KEY   = "orchestrator_chat_auth_token";
 const USER_ID_STORAGE_KEY      = "orchestrator_chat_user_id";
 
 let currentMode = "login";   // "login" | "register"
@@ -121,9 +122,10 @@ function friendlyError(statusCode, detailText) {
     return `요청 실패 (${statusCode}) : ${detailText || "잠시 후 다시 시도하세요."}`;
 }
 
-function enterChat(userId) {
+function enterChat(userId, token) {
     localStorage.setItem(AUTH_USER_ID_STORAGE_KEY, userId);
     localStorage.setItem(USER_ID_STORAGE_KEY, userId);   // 방 목록 스코핑 키와 동기화
+    if (token) localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);   // API 요청 Authorization 헤더에 사용
     location.replace("chat.html");
 }
 
@@ -148,8 +150,9 @@ async function onSubmit(event) {
             body    : JSON.stringify({ user_id : userId, password : password })
         });
         if (response.ok) {
-            // 회원가입 성공 시 곧바로 로그인 상태로 진입한다
-            enterChat(userId);
+            // 회원가입/로그인 성공 : 발급된 토큰을 저장하고 채팅으로 진입한다
+            const responseData = await response.json().catch(() => ({}));
+            enterChat(userId, responseData.token);
             return false;
         }
         let detailText = "";

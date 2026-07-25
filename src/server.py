@@ -20,6 +20,7 @@ import sys
 import json
 import time
 import uuid
+import secrets
 import asyncio
 import uvicorn
 
@@ -30,6 +31,7 @@ if sys.platform == "win32":
 from dotenv                  import load_dotenv
 from fastapi                 import FastAPI
 from fastapi                 import HTTPException
+from fastapi                 import Header
 from fastapi.responses       import StreamingResponse
 from fastapi.responses       import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,6 +56,7 @@ from common.config.environment_variable_helper                 import Environmen
 from common.cache.redis_stream.redis_client_factory            import RedisClientFactory
 from common.cache.redis_stream.redis_configuration_factory     import RedisConfigurationFactory
 from common.security.password_helper                           import PasswordHelper
+from common.security.auth_token_helper                         import AuthTokenHelper
 from app.auth.user_schema_initializer                          import UserSchemaInitializer
 from app.auth.user_repository                                  import UserRepository
 from app.llm.job.job_configuration                             import JobConfiguration
@@ -243,6 +246,11 @@ class ServerApplication:
         self.job_schema_initializer  = JobSchemaInitializer(self.postgresql_pool_manager)
         self.user_schema_initializer = UserSchemaInitializer(self.postgresql_pool_manager)
         self.user_repository         = UserRepository(self.postgresql_pool_manager)
+        # 인증 토큰 : AUTH_TOKEN_SECRET 미설정 시 프로세스 임시 비밀키(재시작 시 기존 토큰 무효화)
+        self.auth_token_secret           = os.getenv("AUTH_TOKEN_SECRET") or secrets.token_hex(32)
+        self.auth_token_ttl_second_count = int(os.getenv("AUTH_TOKEN_TTL_SECOND_COUNT", "604800"))   # 기본 7일
+        if not os.getenv("AUTH_TOKEN_SECRET"):
+            print("WARNING : AUTH_TOKEN_SECRET NOT SET - USING EPHEMERAL SECRET (TOKENS INVALIDATE ON RESTART)", flush = True)
         self.job_transfer            = JobTransfer(
             self.postgresql_pool_manager,
             self.redis_stream_client,
@@ -492,8 +500,29 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
     # 인증 라우트 핸들러 (사용자 등록 / 로그인)
     ##################################################
 
+    def _issue_token(self, user_id : str) -> str:
+        return AuthTokenHelper.create_token(user_id, self.auth_token_secret, self.auth_token_ttl_second_count)
+
+    def _require_authenticated_user_id(self, authorization : Optional[str]) -> str:
+        # Authorization: Bearer <token> 를 검증하고 인증된 user_id 를 반환한다 (없거나 무효면 401)
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code = 401, detail = "AUTHENTICATION REQUIRED")
+        token   = authorization[len("Bearer "):].strip()
+        user_id = AuthTokenHelper.verify_token(token, self.auth_token_secret)
+        if user_id is None:
+            raise HTTPException(status_code = 401, detail = "INVALID OR EXPIRED TOKEN")
+        return user_id
+
+    async def _assert_thread_accessible_async(self, user_id : str, thread_id : str) -> None:
+        # 스레드 소유권 검증 : 다른 사용자가 소유(chat_room)한 thread_id 면 403.
+        # 미등록(신규) 스레드나 본인 소유 스레드는 허용한다.
+        async with self.checkpoint_connection_pool.connection() as connection:
+            cursor = await connection.execute("SELECT 1 FROM chat_room WHERE thread_id = %s AND user_id <> %s LIMIT 1", (thread_id, user_id))
+            if await cursor.fetchone() is not None:
+                raise HTTPException(status_code = 403, detail = "THREAD ACCESS DENIED")
+
     async def register_user_async(self, register_request : RegisterRequest) -> Dict[str, Any]:
-        # 신규 사용자 등록 : user_id 중복이면 409, 유효성 실패면 400
+        # 신규 사용자 등록 : user_id 중복이면 409, 유효성 실패면 400. 성공 시 인증 토큰 발급
         user_id  = register_request.user_id.strip()
         password = register_request.password
         if not user_id or not password:
@@ -504,15 +533,15 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
         is_created    = await self.user_repository.create_user_async(user_id, password_hash)
         if not is_created:
             raise HTTPException(status_code = 409, detail = f"USER ALREADY EXISTS : {user_id}")
-        return {"user_id" : user_id, "status" : "registered"}
+        return {"user_id" : user_id, "token" : self._issue_token(user_id), "status" : "registered"}
 
     async def login_user_async(self, login_request : LoginRequest) -> Dict[str, Any]:
-        # 로그인 검증 : user_id 없음/비밀번호 불일치는 동일하게 401 (계정 존재 여부 노출 방지)
+        # 로그인 검증 : user_id 없음/비밀번호 불일치는 동일하게 401 (계정 존재 여부 노출 방지). 성공 시 인증 토큰 발급
         user_id     = login_request.user_id.strip()
         stored_hash = await self.user_repository.get_password_hash_async(user_id)
         if stored_hash is None or not PasswordHelper.verify_password(login_request.password, stored_hash):
             raise HTTPException(status_code = 401, detail = "INVALID USER ID OR PASSWORD")
-        return {"user_id" : user_id, "status" : "ok"}
+        return {"user_id" : user_id, "token" : self._issue_token(user_id), "status" : "ok"}
 
     ##################################################
     # 모니터 라우트 핸들러
@@ -539,24 +568,33 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
             raise HTTPException(status_code = 502, detail = f"OLLAMA MODEL LIST FAILED : {exception}")
         return {"default_model" : default_model, "models" : model_name_list, "provider" : model_provider}
 
-    async def list_rooms_async(self, user_id : str) -> Dict[str, Any]:
+    async def list_rooms_async(self, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
+        # 인증된 사용자의 방 목록만 반환한다 (스코핑 키는 요청값이 아니라 토큰의 user_id)
+        user_id = self._require_authenticated_user_id(authorization)
         async with self.checkpoint_connection_pool.connection() as connection:
             cursor = await connection.execute(
                 "SELECT room_id, thread_id, title, model, reasoning_effort FROM chat_room WHERE user_id = %s ORDER BY updated_at DESC", (user_id,))
             room_row_list = await cursor.fetchall()
         return {"rooms" : [dict(room_row) for room_row in room_row_list]}
 
-    async def upsert_room_async(self, room_request : RoomUpsertRequest) -> Dict[str, Any]:
+    async def upsert_room_async(self, room_request : RoomUpsertRequest, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
+        # 방 생성/갱신 : 소유자는 토큰의 user_id 로 강제한다 (요청 본문의 user_id 는 무시). 남의 방(room_id) 갈취 방지
+        user_id = self._require_authenticated_user_id(authorization)
+        await self._assert_thread_accessible_async(user_id, room_request.thread_id)
         async with self.checkpoint_connection_pool.connection() as connection:
-            await connection.execute(
+            cursor = await connection.execute(
                 "INSERT INTO chat_room (room_id, user_id, thread_id, title, model, reasoning_effort) VALUES (%s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (room_id) DO UPDATE SET thread_id = EXCLUDED.thread_id, title = EXCLUDED.title, model = EXCLUDED.model, "
-                "reasoning_effort = EXCLUDED.reasoning_effort, updated_at = NOW()",
-                (room_request.room_id, room_request.user_id, room_request.thread_id, room_request.title, room_request.model, room_request.reasoning_effort))
+                "reasoning_effort = EXCLUDED.reasoning_effort, updated_at = NOW() "
+                "WHERE chat_room.user_id = EXCLUDED.user_id",
+                (room_request.room_id, user_id, room_request.thread_id, room_request.title, room_request.model, room_request.reasoning_effort))
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code = 403, detail = "ROOM ACCESS DENIED")
         return {"status" : "ok"}
 
-    async def delete_room_async(self, room_id : str, user_id : str) -> Dict[str, Any]:
-        # 목록에서만 제거한다 (체크포인트 대화 원본은 retention 배치가 유휴 기준으로 정리)
+    async def delete_room_async(self, room_id : str, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
+        # 목록에서만 제거한다 (체크포인트 대화 원본은 retention 배치가 유휴 기준으로 정리). 본인 소유 방만 삭제 가능
+        user_id = self._require_authenticated_user_id(authorization)
         async with self.checkpoint_connection_pool.connection() as connection:
             cursor = await connection.execute("DELETE FROM chat_room WHERE room_id = %s AND user_id = %s", (room_id, user_id))
             if cursor.rowcount == 0:
@@ -570,9 +608,11 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
             raise HTTPException(status_code = 404, detail = f"API CLIENT PAGE NOT FOUND : {frontend_file_path}")
         return FileResponse(frontend_file_path, media_type = "text/html")
 
-    async def get_redis_snapshot_async(self, thread_id : str) -> Dict[str, Any]:
+    async def get_redis_snapshot_async(self, thread_id : str, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
         # 디버그 패널용 : 해당 스레드와 관련된 Redis 키를 실시간 스냅샷으로 반환한다
         # (런 청크 버퍼 키 형식 : orch:{thread_id}:run:{run_id}:chunk_list)
+        user_id = self._require_authenticated_user_id(authorization)
+        await self._assert_thread_accessible_async(user_id, thread_id)
         redis_client = self.orchestrator_redis_client
         def try_parse_json(raw_value):
             text = _to_text(raw_value)
@@ -607,9 +647,11 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
         except Exception as exception:
             raise HTTPException(status_code = 502, detail = f"REDIS SNAPSHOT FAILED : {exception}")
 
-    async def truncate_thread_async(self, thread_id : str, truncate_request : TruncateThreadRequest) -> Dict[str, Any]:
+    async def truncate_thread_async(self, thread_id : str, truncate_request : TruncateThreadRequest, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
         # 특정 사용자 질문(0-based 순번)부터 이후 메시지를 체크포인트에서 제거한다.
         # RemoveMessage 를 add_messages 리듀서에 흘려보내 해당 메시지들을 상태에서 지운다.
+        user_id = self._require_authenticated_user_id(authorization)
+        await self._assert_thread_accessible_async(user_id, thread_id)
         if truncate_request.keep_human_message_count < 0:
             raise HTTPException(status_code = 400, detail = "INVALID KEEP HUMAN MESSAGE COUNT")
         runnable_configuration = {"configurable" : {"thread_id" : thread_id}}
@@ -636,8 +678,10 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
         print(f"THREAD TRUNCATED : THREAD {thread_id} - KEPT {cut_index} - REMOVED {len(removal_message_list)}", flush = True)
         return {"thread_id" : thread_id, "kept_count" : cut_index, "removed_count" : len(removal_message_list)}
 
-    async def get_thread_messages_async(self, thread_id : str) -> Dict[str, Any]:
+    async def get_thread_messages_async(self, thread_id : str, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
         # 대화 내용 복원 : LangGraph 체크포인트(messages 채널)를 표시용 [{role, text, reasoning}] 으로 변환한다
+        user_id = self._require_authenticated_user_id(authorization)
+        await self._assert_thread_accessible_async(user_id, thread_id)
         state_snapshot = await self._get_or_create_compiled_graph(None, None).aget_state({"configurable" : {"thread_id" : thread_id}})
         message_list   = state_snapshot.values.get("messages", []) if state_snapshot else []
         display_message_list = []
@@ -650,8 +694,10 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
                 display_message_list.append({"role" : "agent", "text" : body_text, "reasoning" : reasoning_text or None})
         return {"thread_id" : thread_id, "messages" : display_message_list}
 
-    async def diagnose_thread_async(self, thread_id : str) -> Dict[str, Any]:
+    async def diagnose_thread_async(self, thread_id : str, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
         # ① 순수 체크포인트 로드 시간 : aget_state 전후를 perf_counter 로 측정한다
+        user_id = self._require_authenticated_user_id(authorization)
+        await self._assert_thread_accessible_async(user_id, thread_id)
         runnable_configuration = {"configurable" : {"thread_id" : thread_id}}
         load_started_at        = time.perf_counter()
         state_snapshot         = await self._get_or_create_compiled_graph(None, None).aget_state(runnable_configuration)
@@ -693,7 +739,10 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
             self.is_run_buffer_disabled = True
             print(f"RUN BUFFER DISABLED : REDIS UNAVAILABLE - {exception}", flush = True)
 
-    async def stream_async(self, stream_request : StreamRequest) -> StreamingResponse:
+    async def stream_async(self, stream_request : StreamRequest, authorization : Optional[str] = Header(None)) -> StreamingResponse:
+        # 인증 + 스레드 소유권 검증 : 남의 스레드로 스트리밍(대화 이어쓰기) 방지
+        user_id = self._require_authenticated_user_id(authorization)
+        await self._assert_thread_accessible_async(user_id, stream_request.thread_id)
         # 이번 턴(그래프 1회 실행)을 식별하는 run_id 를 발급한다.
         # 오케스트레이터(GraphStreamExecutor)와 동일하게 configurable.run_id 로 그래프에 전달하고,
         # 청크를 orch:{thread_id}:run:{run_id}:chunk_list 버퍼에 누적해 디버그 패널에서 추적할 수 있게 한다.
