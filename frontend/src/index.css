@@ -28,11 +28,17 @@
     .typing-dot:nth-child(2) { animation-delay : 0.2s; }
     .typing-dot:nth-child(3) { animation-delay : 0.4s; }
 
+    /* 음성 인식 중 표시 : 막대 3개가 시차를 두고 오르내려 음파처럼 보인다 */
+    .sound-wave-bar              { animation : sound-wave 0.9s ease-in-out infinite; }
+    .sound-wave-bar:nth-child(2) { animation-delay : 0.15s; }
+    .sound-wave-bar:nth-child(3) { animation-delay : 0.3s; }
+
     .bubble-enter { animation : bubble-in 0.18s ease-out; }
     .toast-enter  { animation : toast-in 0.2s ease-out; }
 }
 
 @keyframes typing-blink { 0%, 100% { opacity : 0.2; } 50% { opacity : 1; } }
+@keyframes sound-wave   { 0%, 100% { transform : scaleY(0.3); } 50% { transform : scaleY(1); } }
 @keyframes bubble-in    { from { opacity : 0; transform : translateY(6px); }  to { opacity : 1; transform : translateY(0); } }
 @keyframes toast-in     { from { opacity : 0; transform : translateX(12px); } to { opacity : 1; transform : translateX(0); } }
 

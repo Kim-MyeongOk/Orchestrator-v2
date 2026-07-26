@@ -64,6 +64,28 @@ export function SpeakerIcon({ isSpeaking }) {
     );
 }
 
+export function MicrophoneIcon() {
+    return (
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+            <rect x="9" y="2" width="6" height="11" rx="3" />
+            <path d="M5 10a7 7 0 0 0 14 0" />
+            <path d="M12 17v4" />
+        </svg>
+    );
+}
+
+export function SoundWaveIcon() {
+    // 인식 중 표시 : 막대 3개가 서로 다른 위상으로 오르내린다 (키프레임은 index.css)
+    return (
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+            <rect className="sound-wave-bar" x="4"    y="6" width="3" height="12" rx="1.5" style={{ transformOrigin : "5.5px 12px" }} />
+            <rect className="sound-wave-bar" x="10.5" y="6" width="3" height="12" rx="1.5" style={{ transformOrigin : "12px 12px" }} />
+            <rect className="sound-wave-bar" x="17"   y="6" width="3" height="12" rx="1.5" style={{ transformOrigin : "18.5px 12px" }} />
+        </svg>
+    );
+}
+
 export function SunIcon() {
     return (
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
