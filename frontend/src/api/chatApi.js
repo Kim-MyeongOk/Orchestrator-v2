@@ -89,6 +89,44 @@ export async function deleteRoomAsync(roomId) {
     } catch (_ignored) {}
 }
 
+/* ══════════════════ 북마크 ══════════════════ */
+
+export async function listBookmarksAsync() {
+    // 서버 응답(snake_case) → 화면 모델(camelCase). 방 삭제 시 FK CASCADE 로 함께 지워지므로 유효한 것만 내려온다.
+    const result = await readJsonOrThrowAsync(await authFetch("/bookmarks"));
+    return result.bookmarks.map(serverBookmark => ({
+        bookmarkId  : serverBookmark.bookmark_id,
+        roomId      : serverBookmark.room_id,
+        agentIndex  : serverBookmark.agent_index,
+        text        : serverBookmark.text || "",
+        completedAt : serverBookmark.completed_at || serverBookmark.created_at,
+        createdAt   : serverBookmark.created_at
+    }));
+}
+
+export async function upsertBookmarkAsync(bookmark) {
+    // 낙관적 UI : 화면은 이미 갱신된 상태라 실패해도 되돌리지 않고 조용히 넘긴다 (다음 로드 때 서버 상태로 수렴)
+    try {
+        await authFetch("/bookmarks", {
+            method  : "POST",
+            headers : { "Content-Type" : "application/json" },
+            body    : JSON.stringify({
+                bookmark_id  : bookmark.bookmarkId,
+                room_id      : bookmark.roomId,
+                agent_index  : bookmark.agentIndex,
+                text         : bookmark.text || "",
+                completed_at : bookmark.completedAt || null
+            })
+        });
+    } catch (_ignored) {}
+}
+
+export async function deleteBookmarkAsync(bookmarkId) {
+    try {
+        await authFetch(`/bookmarks/${encodeURIComponent(bookmarkId)}`, { method : "DELETE" });
+    } catch (_ignored) {}
+}
+
 /* ══════════════════ 스레드(체크포인트) ══════════════════ */
 
 export async function getThreadMessagesAsync(threadId) {

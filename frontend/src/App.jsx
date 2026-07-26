@@ -44,7 +44,7 @@ export default function App() {
     );
 
     const rooms     = useRooms({ showToast });
-    const bookmarks = useBookmarks();
+    const bookmarks = useBookmarks({ showToast });
 
     const stream = useChatStream({
         appendMessage          : rooms.appendMessage,

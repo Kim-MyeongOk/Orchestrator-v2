@@ -41,7 +41,7 @@ frontend/
     ├── hooks/
     │   ├── useRooms.js         채팅방 CRUD · 서버 동기화 · localStorage 폴백
     │   ├── useChatStream.js    스트리밍 1턴 실행 (지수 백오프 재시도 · 중단)
-    │   ├── useBookmarks.js     북마크 (사용자별 분리 · localStorage)
+    │   ├── useBookmarks.js     북마크 (답변 단위 · 서버 chat_bookmark · localStorage 폴백)
     │   ├── useTheme.js
     │   └── useToast.js
     ├── utils/
@@ -71,7 +71,7 @@ frontend/
 |---|---|---|
 | `roomList`, `activeRoomId` | `useRooms` | 서버(chat_room) + localStorage 캐시 |
 | `messages` (방별) | `useRooms` 내부 room 객체 | localStorage + 체크포인트 복원 |
-| `bookmarkList` | `useBookmarks` | localStorage (사용자별 필터) |
+| `bookmarkList` | `useBookmarks` | 서버(chat_bookmark) + localStorage 캐시 |
 | `streamingState` | `useChatStream` | 휘발성 (완료 시 messages 로 커밋) |
 | `inputValue`, `sidebarTabName` | `App` | — |
 | 테마 / 개발자 모드 / API URL | `useTheme`, `App` | localStorage |
