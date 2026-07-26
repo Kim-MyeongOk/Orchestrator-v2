@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ══════════════════════════════════════════════════════════════
+   기존 chat.html 의 <style> 블록을 그대로 옮겨온 전역 스타일.
+   Tailwind 유틸리티로 표현할 수 없는 것(스크롤바 의사요소, 키프레임,
+   marked 가 만들어내는 마크다운 HTML 서식)만 남긴다.
+   ══════════════════════════════════════════════════════════════ */
+
+@layer base {
+    /* 테마 전환 시 배경·글자·테두리 색을 부드럽게 전환한다 */
+    body, body * {
+        transition-property        : background-color, border-color, color;
+        transition-duration        : 0.25s;
+        transition-timing-function : ease;
+    }
+}
+
+@layer components {
+    .chat-scroll::-webkit-scrollbar                 { width : 6px; }
+    .chat-scroll::-webkit-scrollbar-thumb           { background : #cbd5e1; border-radius : 3px; }
+    html.dark .chat-scroll::-webkit-scrollbar-thumb { background : #334155; }
+    .chat-scroll::-webkit-scrollbar-track           { background : transparent; }
+
+    /* 타이핑 인디케이터 : 점 3개가 순차적으로 깜빡인다 */
+    .typing-dot              { animation : typing-blink 1.2s infinite; }
+    .typing-dot:nth-child(2) { animation-delay : 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay : 0.4s; }
+
+    .bubble-enter { animation : bubble-in 0.18s ease-out; }
+    .toast-enter  { animation : toast-in 0.2s ease-out; }
+}
+
+@keyframes typing-blink { 0%, 100% { opacity : 0.2; } 50% { opacity : 1; } }
+@keyframes bubble-in    { from { opacity : 0; transform : translateY(6px); }  to { opacity : 1; transform : translateY(0); } }
+@keyframes toast-in     { from { opacity : 0; transform : translateX(12px); } to { opacity : 1; transform : translateX(0); } }
+
+/* ── 답변 마크다운 렌더링 (.md-body : 스트리밍 완료 시점에 부여) ──
+   marked 가 생성한 HTML 은 React 밖에서 만들어지므로 Tailwind 로 클래스를 붙일 수 없다.
+   따라서 자식 선택자 기반 전역 스타일로 서식을 지정한다. */
+.md-body { line-height : 1.65; word-break : break-word; }
+.md-body > *:first-child { margin-top : 0; }
+.md-body > *:last-child  { margin-bottom : 0; }
+.md-body p { margin : 0.5em 0; }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4 { font-weight : 700; line-height : 1.3; margin : 0.9em 0 0.4em; }
+.md-body h1 { font-size : 1.35em; }
+.md-body h2 { font-size : 1.2em; }
+.md-body h3 { font-size : 1.08em; }
+.md-body h4 { font-size : 1em; }
+.md-body ul, .md-body ol { margin : 0.5em 0; padding-left : 1.4em; }
+.md-body ul { list-style : disc; }
+.md-body ol { list-style : decimal; }
+.md-body li { margin : 0.2em 0; }
+.md-body li > ul, .md-body li > ol { margin : 0.2em 0; }
+.md-body a { color : #4f46e5; text-decoration : underline; }
+html.dark .md-body a { color : #a5b4fc; }
+.md-body strong { font-weight : 700; }
+.md-body em { font-style : italic; }
+.md-body code { font-family : ui-monospace, SFMono-Regular, Menlo, monospace; font-size : 0.88em; background : #e2e8f0; padding : 0.12em 0.36em; border-radius : 4px; }
+html.dark .md-body code { background : #1e293b; }
+.md-body pre { background : #0f172a; color : #e2e8f0; padding : 0.75em 0.9em; border-radius : 8px; overflow-x : auto; margin : 0.6em 0; }
+.md-body pre code { background : transparent; padding : 0; font-size : 0.85em; color : inherit; }
+.md-body blockquote { border-left : 3px solid #cbd5e1; padding-left : 0.8em; margin : 0.6em 0; color : #64748b; }
+html.dark .md-body blockquote { border-left-color : #475569; color : #94a3b8; }
+.md-body hr { border : none; border-top : 1px solid #cbd5e1; margin : 0.9em 0; }
+html.dark .md-body hr { border-top-color : #334155; }
+.md-body table { border-collapse : collapse; margin : 0.6em 0; display : block; overflow-x : auto; }
+.md-body th, .md-body td { border : 1px solid #cbd5e1; padding : 0.35em 0.6em; text-align : left; }
+html.dark .md-body th, html.dark .md-body td { border-color : #334155; }
+.md-body th { background : #f1f5f9; font-weight : 600; }
+html.dark .md-body th { background : #1e293b; }
+.md-body img { max-width : 100%; border-radius : 6px; }
