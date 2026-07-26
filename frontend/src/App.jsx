@@ -207,6 +207,7 @@ export default function App() {
                 bookmarkList={bookmarks.bookmarkList}
                 onOpenBookmark={onOpenBookmark}
                 onRemoveBookmark={(bookmark) => bookmarks.toggleBookmark(bookmark.roomId, bookmark.agentIndex, bookmark.text, bookmark.completedAt)}
+                onUpdateBookmarkMemo={bookmarks.updateBookmarkMemo}
                 onCreateRoom={rooms.createRoom}
                 onSwitchRoom={onSwitchRoom}
                 onRenameRoom={rooms.renameRoom}

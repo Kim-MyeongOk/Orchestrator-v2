@@ -234,6 +234,12 @@ class BookmarkUpsertRequest(BaseModel):
     agent_index  : int
     text         : str            = ""     # 목록 미리보기용 스냅샷 (체크포인트를 열지 않고 사이드바를 그리기 위함)
     completed_at : Optional[int]  = None   # 답변 완료 시각 (epoch ms)
+    memo         : Optional[str]  = None   # 사용자 메모. None 이면 "건드리지 않음" — 기존 메모를 지우지 않는다
+
+
+class BookmarkMemoUpdateRequest(BaseModel):
+    # 메모만 부분 수정한다 (PATCH). 빈 문자열이면 메모 삭제로 취급해 NULL 로 저장한다.
+    memo : Optional[str] = None
 
 
 class StreamRequest(BaseModel):
@@ -255,6 +261,8 @@ class TruncateThreadRequest(BaseModel):
 
 
 class ServerApplication:
+    BOOKMARK_MEMO_MAXIMUM_LENGTH = 1000   # 북마크 메모 최대 길이 (기본값 : 1000)
+
     def __init__(self) -> None:
         load_dotenv()
         self.postgresql_pool_manager = PostgresqlPoolManager(ServerApplication._get_postgresql_configuration())
@@ -387,6 +395,7 @@ class ServerApplication:
         self.application.add_api_route("/rooms/{room_id}",              self.delete_room_async,         methods = ["DELETE"])
         self.application.add_api_route("/bookmarks",                    self.list_bookmarks_async,      methods = ["GET"])
         self.application.add_api_route("/bookmarks",                    self.upsert_bookmark_async,     methods = ["POST"])
+        self.application.add_api_route("/bookmarks/{bookmark_id}",      self.update_bookmark_memo_async, methods = ["PATCH"])   # 메모만 부분 수정
         self.application.add_api_route("/bookmarks/{bookmark_id}",      self.delete_bookmark_async,     methods = ["DELETE"])
         self.application.add_api_route("/threads/{thread_id}/messages", self.get_thread_messages_async, methods = ["GET"])
         self.application.add_api_route("/threads/{thread_id}/truncate", self.truncate_thread_async,     methods = ["POST"])   # 질문 수정 후 그 지점부터 재개
@@ -574,6 +583,11 @@ CREATE TABLE IF NOT EXISTS chat_bookmark
     UNIQUE (room_id, agent_index)
 );
 CREATE INDEX IF NOT EXISTS idx_chat_bookmark_user_created ON chat_bookmark (user_id, created_at DESC);
+
+-- 메모 : 북마크한 답변에 사용자가 직접 남기는 짧은 기록.
+-- (기존 배포에도 붙어야 하므로 CREATE 가 아니라 ADD COLUMN IF NOT EXISTS 로 추가한다)
+-- NULL 은 "메모 없음" — 빈 문자열과 구분해 두어야 upsert 시 COALESCE 로 기존 메모를 보존할 수 있다.
+ALTER TABLE chat_bookmark ADD COLUMN IF NOT EXISTS memo TEXT;
 """)
 
     ##################################################
@@ -690,12 +704,22 @@ CREATE INDEX IF NOT EXISTS idx_chat_bookmark_user_created ON chat_bookmark (user
         user_id = self._require_authenticated_user_id(authorization)
         async with self.checkpoint_connection_pool.connection() as connection:
             cursor = await connection.execute(
-                "SELECT bookmark_id, room_id, agent_index, text, "
+                "SELECT bookmark_id, room_id, agent_index, text, memo, "
                 "       (EXTRACT(EPOCH FROM completed_at) * 1000)::BIGINT AS completed_at, "
                 "       (EXTRACT(EPOCH FROM created_at)   * 1000)::BIGINT AS created_at "
                 "FROM chat_bookmark WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
             bookmark_row_list = await cursor.fetchall()
         return {"bookmarks" : [dict(bookmark_row) for bookmark_row in bookmark_row_list]}
+
+    @staticmethod
+    def _normalize_bookmark_memo(memo : Optional[str]) -> Optional[str]:
+        # 메모 정규화 : 앞뒤 공백 제거 후 빈 문자열은 NULL(메모 없음)로, 그 외는 최대 길이로 자른다
+        if memo is None:
+            return None
+        trimmed_memo = memo.strip()
+        if not trimmed_memo:
+            return None
+        return trimmed_memo[:ServerApplication.BOOKMARK_MEMO_MAXIMUM_LENGTH]
 
     async def upsert_bookmark_async(self, bookmark_request : BookmarkUpsertRequest, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
         # 북마크 추가 : 소유자는 토큰의 user_id 로 강제한다. 남의 방에는 북마크할 수 없다.
@@ -703,20 +727,34 @@ CREATE INDEX IF NOT EXISTS idx_chat_bookmark_user_created ON chat_bookmark (user
         if bookmark_request.agent_index < 0:
             raise HTTPException(status_code = 400, detail = "INVALID AGENT INDEX")
         completed_at_second = (bookmark_request.completed_at / 1000) if bookmark_request.completed_at else None
+        memo_text           = ServerApplication._normalize_bookmark_memo(bookmark_request.memo)
         async with self.checkpoint_connection_pool.connection() as connection:
             # 방 소유권 확인 : 본인 소유가 아니면(또는 없는 방이면) INSERT 대상 자체가 없다
             cursor = await connection.execute("SELECT 1 FROM chat_room WHERE room_id = %s AND user_id = %s", (bookmark_request.room_id, user_id))
             if await cursor.fetchone() is None:
                 raise HTTPException(status_code = 403, detail = "ROOM ACCESS DENIED")
             # 같은 답변을 다시 북마크하면 미리보기 스냅샷만 갱신한다 (중복 행을 만들지 않는다)
+            # 메모는 COALESCE 로 보존한다 — 캐시 재등록처럼 메모를 싣지 않은 요청이 기존 메모를 지우면 안 된다
             await connection.execute(
-                "INSERT INTO chat_bookmark (bookmark_id, user_id, room_id, agent_index, text, completed_at) "
-                "VALUES (%s, %s, %s, %s, %s, TO_TIMESTAMP(%s)) "
+                "INSERT INTO chat_bookmark (bookmark_id, user_id, room_id, agent_index, text, completed_at, memo) "
+                "VALUES (%s, %s, %s, %s, %s, TO_TIMESTAMP(%s), %s) "
                 "ON CONFLICT (room_id, agent_index) DO UPDATE SET bookmark_id = EXCLUDED.bookmark_id, text = EXCLUDED.text, "
-                "completed_at = EXCLUDED.completed_at",
+                "completed_at = EXCLUDED.completed_at, memo = COALESCE(EXCLUDED.memo, chat_bookmark.memo)",
                 (bookmark_request.bookmark_id, user_id, bookmark_request.room_id, bookmark_request.agent_index,
-                 bookmark_request.text[:500], completed_at_second))
+                 bookmark_request.text[:500], completed_at_second, memo_text))
         return {"status" : "ok"}
+
+    async def update_bookmark_memo_async(self, bookmark_id : str, memo_request : BookmarkMemoUpdateRequest,
+                                         authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
+        # 메모 수정 : 본인 소유 북마크만 수정 가능. 빈 문자열/누락이면 메모를 지운다(NULL).
+        user_id   = self._require_authenticated_user_id(authorization)
+        memo_text = ServerApplication._normalize_bookmark_memo(memo_request.memo)
+        async with self.checkpoint_connection_pool.connection() as connection:
+            cursor = await connection.execute(
+                "UPDATE chat_bookmark SET memo = %s WHERE bookmark_id = %s AND user_id = %s", (memo_text, bookmark_id, user_id))
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code = 404, detail = f"BOOKMARK NOT FOUND : {bookmark_id}")
+        return {"status" : "ok", "bookmark_id" : bookmark_id, "memo" : memo_text}
 
     async def delete_bookmark_async(self, bookmark_id : str, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
         # 본인 소유 북마크만 삭제 가능. 이미 없으면 404 대신 성공으로 처리한다 (토글 연타/낙관적 UI 재시도 대비)

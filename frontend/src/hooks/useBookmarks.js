@@ -7,10 +7,11 @@ import { BOOKMARK_STORAGE_KEY } from "../constants/storageKeys";
 import { readJsonFromStorage }  from "../constants/storageKeys";
 import { writeJsonToStorage }   from "../constants/storageKeys";
 
-import { deleteBookmarkAsync } from "../api/chatApi";
-import { getUserId }           from "../api/chatApi";
-import { listBookmarksAsync }  from "../api/chatApi";
-import { upsertBookmarkAsync } from "../api/chatApi";
+import { deleteBookmarkAsync }     from "../api/chatApi";
+import { getUserId }               from "../api/chatApi";
+import { listBookmarksAsync }      from "../api/chatApi";
+import { updateBookmarkMemoAsync } from "../api/chatApi";
+import { upsertBookmarkAsync }     from "../api/chatApi";
 
 /* 북마크 : 서버(chat_bookmark 테이블)가 원본, localStorage 는 오프라인 폴백 캐시.
    식별 키는 (방, 방 안에서의 에이전트 답변 순번) 조합이다.
@@ -92,12 +93,42 @@ export function useBookmarks({ showToast } = {}) {
                 roomId      : roomId,
                 agentIndex  : agentIndex,
                 text        : (answerText || "").slice(0, 500),   // 미리보기용 스냅샷
+                memo        : "",
                 completedAt : completedAtMs || Date.now(),
                 createdAt   : Date.now()
             };
             upsertBookmarkAsync(newBookmark);
             return [newBookmark, ...previousList];
         });
+    }, []);
+
+    /* ── 메모 수정 ──
+       토글과 달리 낙관적 갱신 후 실패하면 되돌린다.
+       사용자가 직접 입력한 내용이라 조용히 사라지면 저장된 줄로 오해하기 때문이다. */
+
+    const updateBookmarkMemo = useCallback(async (bookmarkId, memoText) => {
+        const normalizedMemo = (memoText || "").trim();
+        let   previousMemo   = "";
+
+        setBookmarkList(previousList => previousList.map(bookmark => {
+            if (bookmark.bookmarkId !== bookmarkId) return bookmark;
+            previousMemo = bookmark.memo || "";
+            return { ...bookmark, memo : normalizedMemo };
+        }));
+
+        try {
+            const savedMemo = await updateBookmarkMemoAsync(bookmarkId, normalizedMemo);
+            // 서버가 자른(최대 길이) 결과로 맞춰 둔다
+            setBookmarkList(previousList => previousList.map(bookmark =>
+                bookmark.bookmarkId === bookmarkId ? { ...bookmark, memo : savedMemo } : bookmark));
+            return true;
+        } catch (error) {
+            setBookmarkList(previousList => previousList.map(bookmark =>
+                bookmark.bookmarkId === bookmarkId ? { ...bookmark, memo : previousMemo } : bookmark));
+            if (showToast) showToast(`⚠ 메모 저장에 실패했습니다 (${error.message})`);
+            return false;
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     /* ── 정리 : 서버에도 같은 규칙이 걸려 있지만(방 삭제 CASCADE · 절단 시 삭제)
@@ -122,5 +153,5 @@ export function useBookmarks({ showToast } = {}) {
         removeBookmarkListLocally(bookmark => bookmark.roomId === roomId && bookmark.agentIndex >= fromAgentIndex);
     }, [removeBookmarkListLocally]);
 
-    return { bookmarkList, isBookmarked, toggleBookmark, removeRoomBookmarks, removeBookmarksFromAgentIndex };
+    return { bookmarkList, isBookmarked, toggleBookmark, updateBookmarkMemo, removeRoomBookmarks, removeBookmarksFromAgentIndex };
 }

@@ -99,6 +99,7 @@ export async function listBookmarksAsync() {
         roomId      : serverBookmark.room_id,
         agentIndex  : serverBookmark.agent_index,
         text        : serverBookmark.text || "",
+        memo        : serverBookmark.memo || "",
         completedAt : serverBookmark.completed_at || serverBookmark.created_at,
         createdAt   : serverBookmark.created_at
     }));
@@ -115,10 +116,23 @@ export async function upsertBookmarkAsync(bookmark) {
                 room_id      : bookmark.roomId,
                 agent_index  : bookmark.agentIndex,
                 text         : bookmark.text || "",
-                completed_at : bookmark.completedAt || null
+                completed_at : bookmark.completedAt || null,
+                memo         : bookmark.memo || null
             })
         });
     } catch (_ignored) {}
+}
+
+export async function updateBookmarkMemoAsync(bookmarkId, memoText) {
+    // 메모 수정은 사용자가 명시적으로 누른 동작이므로 조용히 삼키지 않고 던진다.
+    // 호출 측(useBookmarks)에서 실패를 알리고 화면을 되돌린다.
+    const response = await authFetch(`/bookmarks/${encodeURIComponent(bookmarkId)}`, {
+        method  : "PATCH",
+        headers : { "Content-Type" : "application/json" },
+        body    : JSON.stringify({ memo : memoText || null })
+    });
+    const result = await readJsonOrThrowAsync(response);
+    return result.memo || "";
 }
 
 export async function deleteBookmarkAsync(bookmarkId) {
