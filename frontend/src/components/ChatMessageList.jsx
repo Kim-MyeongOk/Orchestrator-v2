@@ -14,7 +14,8 @@ const NEAR_BOTTOM_THRESHOLD_PIXEL = 150;
 
 export default function ChatMessageList({
     room, messageList, streamingState, isStreaming, isDeveloperMode,
-    isBookmarked, onToggleBookmark, onSubmitEdit, onBlockedEdit, onRetryError, scrollTargetAgentIndex
+    isBookmarked, onToggleBookmark, onSubmitEdit, onBlockedEdit, onRetryError, scrollTargetAgentIndex,
+    isSpeechSupported, speakingKey, onToggleSpeak
 }) {
     const feedRef              = useRef(null);
     const isPinnedToBottomRef  = useRef(true);   // 사용자가 위로 스크롤했으면 스트리밍이 따라가지 않는다
@@ -115,12 +116,17 @@ export default function ChatMessageList({
         }
 
         const currentAgentIndex = agentMessageIndex++;
+        // 낭독 식별 키 : 방을 옮겨도 같은 순번이 겹치지 않도록 방 ID 를 함께 묶는다
+        const speechKey = `${room.roomId}:${currentAgentIndex}`;
         return (
             <AgentMessage key={messageIndex} message={storedMessage} agentIndex={currentAgentIndex}
                           isBookmarked={isBookmarked(room.roomId, currentAgentIndex)}
                           onToggleBookmark={() => onToggleBookmark(room.roomId, currentAgentIndex, storedMessage.text, storedMessage.meta?.completed_at)}
                           isDeveloperMode={isDeveloperMode}
-                          isHighlighted={highlightedAgentIndex === currentAgentIndex} />
+                          isHighlighted={highlightedAgentIndex === currentAgentIndex}
+                          isSpeechSupported={isSpeechSupported}
+                          isSpeaking={speakingKey === speechKey}
+                          onToggleSpeak={(speechText) => onToggleSpeak(speechKey, speechText)} />
         );
     });
 

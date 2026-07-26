@@ -1,12 +1,14 @@
 import { useMemo }  from "react";
 import { useState } from "react";
 
-import { renderMarkdownToHtml } from "../utils/markdown";
-import { writeTextToClipboard } from "../utils/markdown";
-import { BookmarkIcon }         from "./icons";
-import { CheckIcon }            from "./icons";
-import { CopyIcon }             from "./icons";
-import { CompletedMetaLine }    from "./MetaLine";
+import { renderMarkdownToHtml }  from "../utils/markdown";
+import { stripMarkdownForSpeech } from "../utils/markdown";
+import { writeTextToClipboard }   from "../utils/markdown";
+import { BookmarkIcon }           from "./icons";
+import { CheckIcon }              from "./icons";
+import { CopyIcon }               from "./icons";
+import { SpeakerIcon }            from "./icons";
+import { CompletedMetaLine }      from "./MetaLine";
 
 const TOOLTIP_CLASS = "pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2 py-1 rounded-md "
                     + "bg-slate-800 dark:bg-slate-700 text-white text-[11px] whitespace-nowrap shadow-lg opacity-0 group-hover:opacity-100 transition z-20";
@@ -52,9 +54,28 @@ function AnswerBookmarkButton({ isActive, onToggle }) {
     );
 }
 
+/* 답변 낭독 토글 버튼 (재생 중이면 정지 아이콘으로 바뀐다) */
+
+function AnswerSpeakButton({ isSpeaking, onToggle }) {
+    return (
+        <span className="group relative shrink-0 inline-flex">
+            <button type="button" onClick={onToggle} aria-pressed={isSpeaking} aria-label={isSpeaking ? "낭독 정지" : "답변 낭독"}
+                    className={`w-5 h-5 rounded flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-800 transition ${
+                        isSpeaking ? "text-indigo-500 dark:text-indigo-400"
+                                   : "text-slate-400 dark:text-slate-500 hover:text-indigo-500 dark:hover:text-indigo-400"}`}>
+                <SpeakerIcon isSpeaking={isSpeaking} />
+            </button>
+            <span className={TOOLTIP_CLASS}>{isSpeaking ? "낭독 정지" : "소리로 듣기"}</span>
+        </span>
+    );
+}
+
 /* 완료된 에이전트 답변 말풍선 : 생각 과정(접이식) + 마크다운 본문 + 하단 액션/메타 행 */
 
-export default function AgentMessage({ message, agentIndex, isBookmarked, onToggleBookmark, isDeveloperMode, isHighlighted }) {
+export default function AgentMessage({
+    message, agentIndex, isBookmarked, onToggleBookmark, isDeveloperMode, isHighlighted,
+    isSpeechSupported, isSpeaking, onToggleSpeak
+}) {
     const isEmptyAnswer = (message.text || "").trim() === "";
     const answerHtml    = useMemo(() => (isEmptyAnswer ? "" : renderMarkdownToHtml(message.text)), [message.text, isEmptyAnswer]);
 
@@ -82,6 +103,11 @@ export default function AgentMessage({ message, agentIndex, isBookmarked, onTogg
 
                 <div className="flex items-center gap-1.5 mt-1 px-1 min-h-5">
                     <AnswerCopyButton answerText={message.text} />
+                    {/* 낭독은 읽을 본문이 있을 때만 (빈 응답·미지원 브라우저에서는 버튼 자체를 숨긴다) */}
+                    {isSpeechSupported && !isEmptyAnswer
+                        ? <AnswerSpeakButton isSpeaking={isSpeaking}
+                                             onToggle={() => onToggleSpeak(stripMarkdownForSpeech(message.text))} />
+                        : null}
                     {agentIndex !== null && agentIndex !== undefined
                         ? <AnswerBookmarkButton isActive={isBookmarked} onToggle={onToggleBookmark} />
                         : null}
