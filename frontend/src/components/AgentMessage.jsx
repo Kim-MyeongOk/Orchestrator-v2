@@ -75,17 +75,41 @@ function AnswerSpeakButton({ isSpeaking, onToggle }) {
 
 export default function AgentMessage({
     message, agentIndex, isBookmarked, onToggleBookmark, isDeveloperMode, isHighlighted,
-    isSpeechSupported, isSpeaking, onToggleSpeak, onQuoteText
+    isSpeechSupported, isSpeaking, onToggleSpeak, onQuoteText, isReferenceSelected, onToggleReference
 }) {
     const isEmptyAnswer = (message.text || "").trim() === "";
     const answerHtml    = useMemo(() => (isEmptyAnswer ? "" : renderMarkdownToHtml(message.text)), [message.text, isEmptyAnswer]);
 
-    const highlightClass = isHighlighted ? " ring-2 ring-indigo-400 dark:ring-indigo-500" : "";
+    // 북마크 이동 강조(파랑)와 참조 선택(호박)은 서로 다른 뜻이라 색을 나눈다.
+    // 둘이 겹치면 "지금 찾아온 답변" 쪽을 우선 보여준다 (강조는 2초 뒤 사라진다)
+    const ringClass = isHighlighted        ? " ring-2 ring-indigo-400 dark:ring-indigo-500"
+                    : isReferenceSelected  ? " ring-2 ring-amber-400 dark:ring-amber-500"
+                    : "";
+
+    // 빈 응답은 참조로 담아도 모델에 넘길 본문이 없다
+    const isReferenceable = !isEmptyAnswer && agentIndex !== null && agentIndex !== undefined;
+
+    const onBubbleContextMenu = (event) => {
+        // 본문에서 텍스트를 드래그한 우클릭은 ReferenceableText 가 먼저 가로채고 전파를 끊는다.
+        // 여기까지 온 우클릭은 "이 답변을 통째로 참조" 토글이다.
+        if (!isReferenceable) return;
+        event.preventDefault();
+        onToggleReference();
+    };
 
     return (
         <div className="flex justify-start bubble-enter" data-agent-index={agentIndex}>
             <div className="flex flex-col items-start max-w-[78%] md:max-w-[65%]">
-                <div className={`bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700/60 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed shadow w-fit min-w-0 transition${highlightClass}`}>
+                <div onContextMenu={onBubbleContextMenu}
+                     title={isReferenceable ? "우클릭 : 이 답변을 참조로 담기/빼기" : undefined}
+                     className={`relative bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700/60 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed shadow w-fit min-w-0 transition${ringClass}`}>
+                    {/* 참조로 담긴 답변임을 말풍선 자체에 표시한다 (칩 바까지 내려가 확인하지 않아도 되도록) */}
+                    {isReferenceSelected ? (
+                        <span aria-hidden="true"
+                              className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-amber-400 dark:bg-amber-500 text-white text-[10px] flex items-center justify-center shadow ring-2 ring-white dark:ring-slate-900">
+                            📌
+                        </span>
+                    ) : null}
                     {message.reasoning ? (
                         <details className="mb-1.5 -mx-1">
                             <summary className="cursor-pointer select-none text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition px-1">

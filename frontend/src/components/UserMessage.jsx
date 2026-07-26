@@ -5,7 +5,7 @@ import { useState }  from "react";
 /* 사용자 질문 말풍선.
    마우스를 올리면 수정 버튼이 나타나고, 수정하면 이 질문 이후의 대화를 지우고 여기서부터 다시 이어간다. */
 
-export default function UserMessage({ text, referencedText, userMessageIndex, isStreaming, onSubmitEdit, onBlockedEdit }) {
+export default function UserMessage({ text, referencedText, referencedAgentIndexList, userMessageIndex, isStreaming, onSubmitEdit, onBlockedEdit }) {
     const [isEditing, setIsEditing]   = useState(false);
     const [draftText, setDraftText]   = useState(text);
     const textareaRef                 = useRef(null);
@@ -62,6 +62,18 @@ export default function UserMessage({ text, referencedText, userMessageIndex, is
                 ✎
             </button>
             <div className="max-w-[78%] md:max-w-[65%] bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed shadow">
+                {/* 통째로 참조한 답변 : 어떤 답변을 함께 보냈는지 번호로 되짚어 준다 */}
+                {(referencedAgentIndexList || []).length > 0 ? (
+                    <p className="mb-1.5 flex flex-wrap gap-1">
+                        {referencedAgentIndexList.map(agentIndex => (
+                            <span key={agentIndex}
+                                  className="px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 text-[10px] font-medium">
+                                📌 답변 #{agentIndex + 1}
+                            </span>
+                        ))}
+                    </p>
+                ) : null}
+
                 {/* 참조 발췌 : 질문과 함께 모델에 전달된 내용을 인용 블록으로 되짚어 준다 */}
                 {referencedText ? (
                     <p className="mb-1.5 pl-2 border-l-2 border-indigo-400 dark:border-indigo-500 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300 whitespace-pre-wrap break-words line-clamp-4">
