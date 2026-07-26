@@ -45,7 +45,13 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
         if (abortControllerRef.current) abortControllerRef.current.abort();
     }, []);
 
-    const executeStreamTurnAsync = useCallback(async (room, messageText, referencedText = "", presetName = "") => {
+    // 턴 옵션(참조 발췌·답변 참조·프리셋)은 객체로 받는다.
+    // 전부 선택값이라 위치 인자로 늘어놓으면 호출부에서 하나만 빠뜨려도 조용히 기본값으로 나간다.
+    const executeStreamTurnAsync = useCallback(async (room, messageText, turnOption = {}) => {
+        const referencedText          = turnOption.referencedText || "";
+        const referencedMessageIdList = turnOption.referencedMessageIdList || [];
+        const presetName              = turnOption.presetName || "";
+
         const formatElapsedSecondText = (startedAt) => ((performance.now() - startedAt) / 1000).toFixed(1);
 
         streamBufferRef.current = createEmptyStreamBuffer();
@@ -80,6 +86,7 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
                     model           : room.model,
                     reasoningEffort : room.reasoningEffort,
                     referencedText  : referencedText,
+                    referencedMessageIdList : referencedMessageIdList,
                     presetName      : presetName,
                     signal          : abortControllerRef.current.signal,
                     onStart         : (runId) => { if (runId) setRoomLastRunId(room.roomId, runId); },
@@ -111,7 +118,7 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
                         appendMessage(room.roomId, buildAgentMessage());
                         appendMessage(room.roomId, { role : "error", text : shownErrorText });
                     } else {
-                        appendMessage(room.roomId, { role : "error", text : shownErrorText, retryMessageText : messageText, retryReferencedText : referencedText, retryPresetName : presetName });
+                        appendMessage(room.roomId, { role : "error", text : shownErrorText, retryMessageText : messageText, retryTurnOption : { referencedText, referencedMessageIdList, presetName } });
                     }
                     finalStatus = { text : "오류", toneClass : "bg-red-500" };
                     showToast(`⚠ ${isDeveloperMode ? streamErrorText : "서버 응답 오류 — 잠시 후 다시 시도해주세요."}`);
@@ -154,7 +161,7 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
                     shownErrorText = `${failReasonText} — 자동 재시도 ${attemptCount}회 모두 실패했거나 재시도할 수 없는 오류입니다.`;
                 }
                 if (hasReceivedAnyText()) appendMessage(room.roomId, buildAgentMessage());
-                appendMessage(room.roomId, { role : "error", text : shownErrorText, retryMessageText : messageText, retryReferencedText : referencedText, retryPresetName : presetName });
+                appendMessage(room.roomId, { role : "error", text : shownErrorText, retryMessageText : messageText, retryTurnOption : { referencedText, referencedMessageIdList, presetName } });
                 finalStatus = { text : "오류", toneClass : "bg-red-500" };
                 showToast(`⚠ ${failReasonText}\n백엔드(포트 8000) 실행 여부를 확인한 뒤 '다시 시도'를 눌러주세요.`);
                 break;
@@ -169,13 +176,19 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
         return finalStatus;
     }, [appendMessage, cancelPendingFlush, isDeveloperMode, scheduleStreamFlush, setRoomLastRunId, showToast]);
 
-    const sendMessageAsync = useCallback(async (room, messageText, referencedText = "", presetName = "") => {
+    const sendMessageAsync = useCallback(async (room, messageText, turnOption = {}) => {
         // 사용자 메시지를 먼저 확정 저장한 뒤 스트리밍을 시작한다 (첫 메시지는 방 제목이 된다)
-        // referencedText 는 말풍선에 인용 블록으로 보여주기 위해 함께 저장한다 (제목에는 쓰지 않는다)
-        // presetName 은 선택된 LLM 파라미터 프리셋 (LOW/MEDIUM/HIGH)
-        appendMessage(room.roomId, { role : "user", text : messageText, referencedText : referencedText || "" });
+        // 참조 정보는 말풍선에 되짚어 보여주기 위해 함께 저장한다 (제목에는 쓰지 않는다)
+        appendMessage(room.roomId, {
+            role                  : "user",
+            text                  : messageText,
+            referencedText        : turnOption.referencedText || "",
+            referencedAgentIndexList : (turnOption.referencedMessageIdList || [])
+                .map(messageId => Number(String(messageId).replace("agent-", "")))
+                .filter(agentIndex => Number.isInteger(agentIndex))
+        });
         applyFirstMessageTitle(room.roomId, messageText);
-        return executeStreamTurnAsync(room, messageText, referencedText, presetName);
+        return executeStreamTurnAsync(room, messageText, turnOption);
     }, [appendMessage, applyFirstMessageTitle, executeStreamTurnAsync]);
 
     return { isStreaming, streamingState, sendMessageAsync, executeStreamTurnAsync, stopStreaming };

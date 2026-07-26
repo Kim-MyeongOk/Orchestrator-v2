@@ -30,12 +30,17 @@ import { DEVELOPER_MODE_STORAGE_KEY } from "./constants/storageKeys";
 const IDLE_STATUS      = { text : "대기",   toneClass : "bg-slate-400 dark:bg-slate-600" };
 const STREAMING_STATUS = { text : "응답 중", toneClass : "bg-emerald-400 animate-pulse" };
 
+const REFERENCE_MAXIMUM_COUNT          = 10;   // 한 번에 담을 수 있는 답변 참조 개수 (서버 상한과 맞춘다)
+const REFERENCE_PREVIEW_MAXIMUM_LENGTH = 120;  // 칩 툴팁에 보여줄 답변 미리보기 길이
+
 export default function App() {
     const { isDarkTheme, toggleTheme }            = useTheme();
     const { toastList, showToast, dismissToast }  = useToast();
 
     const [inputValue, setInputValue]                     = useState("");
     const [referencedText, setReferencedText]             = useState("");   // 답변에서 「참조하기」로 담은 발췌 (전송 후 비운다)
+    // 우클릭으로 통째로 담은 이전 답변들 : [{ messageId, agentIndex, previewText }] (전송 후 비운다)
+    const [selectedReferenceList, setSelectedReferenceList] = useState([]);
     const [presetName, setPresetName]                     = useState("MEDIUM");   // LLM 파라미터 프리셋 (LOW/MEDIUM/HIGH)
     const [sidebarTabName, setSidebarTabName]             = useState("rooms");
     const [isResetModalOpen, setIsResetModalOpen]         = useState(false);
@@ -140,21 +145,26 @@ export default function App() {
     const onSend = useCallback(async () => {
         const messageText = inputValue.trim();
         if (!messageText || isStreaming || !activeRoom) return;
-        const sentReferencedText = referencedText;
-        const sentPresetName = presetName;
+        const sentTurnOption = {
+            referencedText          : referencedText,
+            referencedMessageIdList : selectedReferenceList.map(reference => reference.messageId),
+            presetName              : presetName
+        };
         stt.stopRecording();   // 받아쓰기가 켜진 채로 두면 방금 비운 입력창에 보낸 문장이 되살아난다
         setInputValue("");
-        setReferencedText("");   // 참조는 한 턴만 따아간다 (다음 질문에 의도치 않게 달라붙지 않도록)
-        // 프리셋은 유지한다 (사용자가 명시적으로 변경할 때까지)
-        const finalStatus = await stream.sendMessageAsync(activeRoom, messageText, sentReferencedText, sentPresetName);
+        // 참조는 한 턴만 따라간다 (다음 질문에 의도치 않게 달라붙지 않도록).
+        // 프리셋은 유지한다 (사용자가 명시적으로 바꿀 때까지).
+        setReferencedText("");
+        setSelectedReferenceList([]);
+        const finalStatus = await stream.sendMessageAsync(activeRoom, messageText, sentTurnOption);
         setStatusInfo(finalStatus);
-    }, [activeRoom, inputValue, isStreaming, referencedText, presetName, stream, stt]);
+    }, [activeRoom, inputValue, isStreaming, referencedText, selectedReferenceList, presetName, stream, stt]);
 
     const onRetryError = useCallback(async (errorMessage) => {
         if (isStreaming || !activeRoom) return;
         rooms.removeErrorMessage(activeRoom.roomId, errorMessage.text);
         // 실패한 턴에 붙어 있던 참조와 프리셋을 그대로 다시 실어 보낸다
-        const finalStatus = await stream.executeStreamTurnAsync(activeRoom, errorMessage.retryMessageText, errorMessage.retryReferencedText || "", errorMessage.retryPresetName || "MEDIUM");
+        const finalStatus = await stream.executeStreamTurnAsync(activeRoom, errorMessage.retryMessageText, errorMessage.retryTurnOption || {});
         setStatusInfo(finalStatus);
     }, [activeRoom, isStreaming, rooms, stream]);
 
@@ -164,6 +174,36 @@ export default function App() {
         if (isStreaming) { showToast("⚠ 응답 중에는 참조를 담을 수 없습니다."); return; }
         setReferencedText(selectedText);
     }, [isStreaming, showToast]);
+
+    /* ── 답변 다중 참조 : 답변을 우클릭해 통째로 담고/뺀다 ── */
+
+    const onToggleReference = useCallback((agentIndex, answerText) => {
+        if (isStreaming) { showToast("⚠ 응답 중에는 참조를 담을 수 없습니다."); return; }
+        setSelectedReferenceList(previousList => {
+            if (previousList.some(reference => reference.agentIndex === agentIndex)) {
+                return previousList.filter(reference => reference.agentIndex !== agentIndex);
+            }
+            if (previousList.length >= REFERENCE_MAXIMUM_COUNT) {
+                showToast(`⚠ 참조는 최대 ${REFERENCE_MAXIMUM_COUNT}개까지 담을 수 있습니다.`);
+                return previousList;
+            }
+            // 담은 순서를 유지한다 — 칩이 눌린 순서대로 늘어서야 어떤 걸 방금 담았는지 알아보기 쉽다
+            return [...previousList, {
+                messageId   : `agent-${agentIndex}`,
+                agentIndex  : agentIndex,
+                previewText : (answerText || "").replace(/\s+/g, " ").trim().slice(0, REFERENCE_PREVIEW_MAXIMUM_LENGTH)
+            }];
+        });
+    }, [isStreaming, showToast]);
+
+    const onRemoveReference = useCallback((agentIndex) => {
+        setSelectedReferenceList(previousList => previousList.filter(reference => reference.agentIndex !== agentIndex));
+    }, []);
+
+    const onClearAllReferences = useCallback(() => {
+        setSelectedReferenceList([]);
+        setReferencedText("");
+    }, []);
 
     /* ── 음성 받아쓰기 : 인식 결과를 입력창에 이어 붙인다 ── */
 
@@ -202,36 +242,48 @@ export default function App() {
         bookmarks.removeBookmarksFromAgentIndex(activeRoom.roomId, keptAgentMessageCount);
         rooms.replaceMessages(activeRoom.roomId, keptMessageList);
 
-        // ③ 수정된 질문으로 그 지점부터 대화를 이어간다
-        const finalStatus = await stream.sendMessageAsync({ ...activeRoom, messages : keptMessageList }, editedText);
+        // 잘려나간 답변을 가리키던 참조도 함께 정리한다 (칩에 남은 번호가 엉뚱한 답변을 가리키게 된다)
+        setSelectedReferenceList(previousList => previousList.filter(reference => reference.agentIndex < keptAgentMessageCount));
+        setReferencedText("");
+
+        // ③ 수정된 질문으로 그 지점부터 대화를 이어간다 (프리셋은 지금 고른 값을 유지한다)
+        const finalStatus = await stream.sendMessageAsync({ ...activeRoom, messages : keptMessageList }, editedText, { presetName : presetName });
         setStatusInfo(finalStatus);
-    }, [activeRoom, bookmarks, isStreaming, rooms, showToast, stream]);
+    }, [activeRoom, bookmarks, isStreaming, presetName, rooms, showToast, stream]);
 
     /* ── 방 조작 ── */
 
     // 새 방 만들기·방 삭제도 결국 보고 있는 방이 바뀐다.
     // 이 둘은 onSwitchRoom 을 거치지 않으므로 받아쓰기 정지를 여기서 따로 걸어준다
     // (안 걸면 마이크가 켜진 채로 새 방에 넘어가 그 방 입력창에 계속 받아 적힌다).
+    // 참조는 "이 방의 몇 번째 답변"이라 방을 옮기면 뜻을 잃는다. 방이 바뀌는 모든 길목에서 비운다.
+    const clearRoomScopedReference = useCallback(() => {
+        setReferencedText("");
+        setSelectedReferenceList([]);
+    }, []);
+
     const onCreateRoom = useCallback(() => {
         stt.stopRecording();
+        clearRoomScopedReference();
         rooms.createRoom();
-    }, [rooms, stt]);
+    }, [clearRoomScopedReference, rooms, stt]);
 
     const onSwitchRoom = useCallback((roomId) => {
         if (isStreaming) { showToast("⚠ 응답 중에는 다른 대화로 이동할 수 없습니다."); return; }
         tts.stopSpeaking();   // 떠난 방의 답변을 계속 읽으면 정지 버튼이 화면에 없어 멈출 방법이 없다
         stt.stopRecording();  // 받아쓰기도 끊는다 — 다른 방 입력창에 이어서 받아 적히면 안 된다
-        setReferencedText("");   // 참조는 떠나온 방의 답변에서 딴 것이라 여기로 들고 오지 않는다
+        clearRoomScopedReference();
         setScrollTargetAgentIndex(null);
         rooms.switchRoom(roomId);
-    }, [isStreaming, rooms, showToast, stt, tts]);
+    }, [clearRoomScopedReference, isStreaming, rooms, showToast, stt, tts]);
 
     const onDeleteRoom = useCallback((roomId) => {
         if (isStreaming) return;
         stt.stopRecording();   // 보고 있던 방을 지우면 다른 방으로 넘어간다 — 마이크를 들고 가지 않는다
+        clearRoomScopedReference();
         bookmarks.removeRoomBookmarks(roomId);   // 삭제된 방의 북마크도 함께 정리
         rooms.deleteRoom(roomId);
-    }, [bookmarks, isStreaming, rooms, stt]);
+    }, [bookmarks, clearRoomScopedReference, isStreaming, rooms, stt]);
 
     const onConfirmReset = useCallback(() => {
         setIsResetModalOpen(false);
@@ -306,11 +358,15 @@ export default function App() {
                     speakingKey={tts.speakingKey}
                     onToggleSpeak={tts.toggleSpeak}
                     onQuoteText={onQuoteText}
+                    selectedReferenceList={selectedReferenceList}
+                    onToggleReference={onToggleReference}
                 />
 
                 <ChatInput inputValue={inputValue} onInputValueChange={setInputValue}
                            onSend={onSend} onStop={stream.stopStreaming} isStreaming={isStreaming}
                            referencedText={referencedText} onClearReference={() => setReferencedText("")}
+                           selectedReferenceList={selectedReferenceList}
+                           onRemoveReference={onRemoveReference} onClearAllReferences={onClearAllReferences}
                            presetName={presetName} onPresetNameChange={setPresetName} availablePresetNames={availablePresetNames}
                            isRecognitionSupported={stt.isRecognitionSupported} isRecording={stt.isRecording} onToggleRecording={onToggleRecording} />
             </main>

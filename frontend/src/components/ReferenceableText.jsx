@@ -53,11 +53,12 @@ export default function ReferenceableText({ onQuote, children }) {
     }, [closePopup, openPopupAt, readSelectionText]);
 
     const onContextMenu = useCallback((event) => {
-        // 선택 구간이 있을 때만 브라우저 기본 메뉴를 가로챈다.
-        // 선택 없이 누른 우클릭까지 막으면 새로고침·검사 같은 평소 동작을 빼앗게 된다.
+        // 선택 구간이 있을 때만 발췌 팝업을 띄운다.
+        // 선택이 없으면 그대로 흘려보낸다 — 말풍선 바깥의 "답변 통째로 참조" 토글이 그 우클릭을 받는다.
         const selectedText = readSelectionText();
         if (!selectedText) return;
         event.preventDefault();
+        event.stopPropagation();   // 발췌를 담는 우클릭이 답변 전체 토글까지 함께 켜지 않도록 끊는다
         openPopupAt(event.clientX, event.clientY - 10, selectedText);
     }, [openPopupAt, readSelectionText]);
 

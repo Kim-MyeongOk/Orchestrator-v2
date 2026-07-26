@@ -15,7 +15,7 @@ const NEAR_BOTTOM_THRESHOLD_PIXEL = 150;
 export default function ChatMessageList({
     room, messageList, streamingState, isStreaming, isDeveloperMode,
     isBookmarked, onToggleBookmark, onSubmitEdit, onBlockedEdit, onRetryError, scrollTargetAgentIndex,
-    isSpeechSupported, speakingKey, onToggleSpeak, onQuoteText
+    isSpeechSupported, speakingKey, onToggleSpeak, onQuoteText, selectedReferenceList, onToggleReference
 }) {
     const feedRef              = useRef(null);
     const isPinnedToBottomRef  = useRef(true);   // 사용자가 위로 스크롤했으면 스트리밍이 따라가지 않는다
@@ -95,6 +95,7 @@ export default function ChatMessageList({
             const currentUserMessageIndex = userMessageIndex++;
             return (
                 <UserMessage key={messageIndex} text={storedMessage.text} referencedText={storedMessage.referencedText}
+                             referencedAgentIndexList={storedMessage.referencedAgentIndexList}
                              userMessageIndex={currentUserMessageIndex}
                              isStreaming={isStreaming} onSubmitEdit={onSubmitEdit} onBlockedEdit={onBlockedEdit} />
             );
@@ -128,7 +129,9 @@ export default function ChatMessageList({
                           isSpeechSupported={isSpeechSupported}
                           isSpeaking={speakingKey === speechKey}
                           onToggleSpeak={(speechText) => onToggleSpeak(speechKey, speechText)}
-                          onQuoteText={onQuoteText} />
+                          onQuoteText={onQuoteText}
+                          isReferenceSelected={(selectedReferenceList || []).some(reference => reference.agentIndex === currentAgentIndex)}
+                          onToggleReference={() => onToggleReference(currentAgentIndex, storedMessage.text)} />
         );
     });
 

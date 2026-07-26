@@ -10,10 +10,12 @@ const TEXTAREA_MAXIMUM_HEIGHT_PIXEL = 160;
 const REFERENCE_PREVIEW_LENGTH      = 60;   // 태그 바에 보여줄 발췌 미리보기 길이
 
 /* 하단 입력 바 : Enter 전송 / Shift+Enter 줄바꿈 · 자동 높이 · 스트리밍 중에는 중단 버튼으로 전환.
-   답변에서 「참조하기」로 담은 발췌가 있으면 입력창 위에 태그 바로 표시한다.
+   입력창 위 칩 바에는 두 종류의 참조가 함께 놓인다.
+     ❝ 발췌   : 답변 본문을 드래그해 담은 문장 일부 (한 번에 하나)
+     📌 답변 #N : 답변을 우클릭해 통째로 담은 것 (여러 개)
    🎙 버튼으로 음성 받아쓰기를 켜면 인식 결과가 입력창에 실시간으로 채워진다. */
 
-export default function ChatInput({ inputValue, onInputValueChange, onSend, onStop, isStreaming, referencedText, onClearReference, presetName, onPresetNameChange, availablePresetNames, isRecognitionSupported, isRecording, onToggleRecording }) {
+export default function ChatInput({ inputValue, onInputValueChange, onSend, onStop, isStreaming, referencedText, onClearReference, presetName, onPresetNameChange, availablePresetNames, isRecognitionSupported, isRecording, onToggleRecording, selectedReferenceList, onRemoveReference, onClearAllReferences }) {
     const textareaRef = useRef(null);
 
     // 참조를 담으면 바로 이어서 질문을 쓸 수 있게 입력창으로 포커스를 옮긴다
@@ -34,37 +36,70 @@ export default function ChatInput({ inputValue, onInputValueChange, onSend, onSt
         if (!isStreaming) textareaRef.current?.focus();
     }, [isStreaming]);
 
+    const referencePreviewText = (referencedText || "").replace(/\s+/g, " ").trim();
+    const isPreviewTruncated   = referencePreviewText.length > REFERENCE_PREVIEW_LENGTH;
+    const referenceChipList    = selectedReferenceList || [];
+    const hasAnyReference      = !!referencedText || referenceChipList.length > 0;
+
     const onKeyDown = (event) => {
         if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             onSend();
             return;
         }
-        // 입력이 비어 있을 때의 Backspace 로도 참조를 뗄 수 있게 한다 (❌ 를 겨냥하지 않아도 되도록)
-        if (event.key === "Backspace" && inputValue === "" && referencedText) {
-            event.preventDefault();
-            onClearReference();
+        // 입력이 비어 있을 때의 Backspace 로도 참조를 뗄 수 있게 한다 (✕ 를 겨냥하지 않아도 되도록)
+        // 마지막에 담은 것부터 하나씩 뗀다 — 발췌가 있으면 발췌를, 없으면 답변 참조의 끝에서부터.
+        if (event.key === "Backspace" && inputValue === "") {
+            if (referencedText) {
+                event.preventDefault();
+                onClearReference();
+            } else if (referenceChipList.length > 0) {
+                event.preventDefault();
+                onRemoveReference(referenceChipList[referenceChipList.length - 1].agentIndex);
+            }
         }
     };
 
-    const referencePreviewText = (referencedText || "").replace(/\s+/g, " ").trim();
-    const isPreviewTruncated   = referencePreviewText.length > REFERENCE_PREVIEW_LENGTH;
-
     return (
         <footer className="shrink-0 border-t border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60 backdrop-blur p-3 md:p-4">
-            {/* 참조 태그 바 : [참조: "선택 텍스트…"] ❌ */}
-            {referencedText ? (
-                <div className="max-w-3xl mx-auto mb-2 flex">
-                    <div className="flex items-center gap-1.5 max-w-full min-w-0 pl-2.5 pr-1.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300">
-                        <span className="shrink-0 text-[11px] font-semibold">참조</span>
-                        <span className="min-w-0 truncate text-[11px]" title={referencedText}>
-                            “{referencePreviewText.slice(0, REFERENCE_PREVIEW_LENGTH)}{isPreviewTruncated ? "…" : ""}”
-                        </span>
-                        <button type="button" onClick={onClearReference} title="참조 해제" aria-label="참조 해제"
-                                className="shrink-0 w-4 h-4 rounded flex items-center justify-center text-indigo-400 dark:text-indigo-500 hover:text-red-500 dark:hover:text-red-400 transition text-[10px]">
-                            ✕
+            {/* 참조 칩 바 : ❝ 드래그 발췌 1개 + 📌 답변 참조 여러 개 */}
+            {hasAnyReference ? (
+                <div className="max-w-3xl mx-auto mb-2 flex flex-wrap items-center gap-1.5">
+                    {referencedText ? (
+                        <div className="flex items-center gap-1.5 max-w-full min-w-0 pl-2.5 pr-1.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300">
+                            <span className="shrink-0 text-[11px] font-semibold">❝ 발췌</span>
+                            <span className="min-w-0 truncate text-[11px]" title={referencedText}>
+                                “{referencePreviewText.slice(0, REFERENCE_PREVIEW_LENGTH)}{isPreviewTruncated ? "…" : ""}”
+                            </span>
+                            <button type="button" onClick={onClearReference} title="발췌 참조 해제" aria-label="발췌 참조 해제"
+                                    className="shrink-0 w-4 h-4 rounded flex items-center justify-center text-indigo-400 dark:text-indigo-500 hover:text-red-500 dark:hover:text-red-400 transition text-[10px]">
+                                ✕
+                            </button>
+                        </div>
+                    ) : null}
+
+                    {referenceChipList.map(reference => (
+                        <div key={reference.messageId}
+                             className="flex items-center gap-1 max-w-full min-w-0 pl-2 pr-1 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-300">
+                            {/* 미리보기를 title 로 붙여 어떤 답변인지 번호만 보고 헷갈리지 않게 한다 */}
+                            <span className="shrink-0 text-[11px] font-semibold" title={reference.previewText}>
+                                📌 답변 #{reference.agentIndex + 1}
+                            </span>
+                            <button type="button" onClick={() => onRemoveReference(reference.agentIndex)}
+                                    title={`답변 #${reference.agentIndex + 1} 참조 해제`} aria-label={`답변 #${reference.agentIndex + 1} 참조 해제`}
+                                    className="shrink-0 w-4 h-4 rounded flex items-center justify-center text-amber-500 dark:text-amber-600 hover:text-red-500 dark:hover:text-red-400 transition text-[10px]">
+                                ✕
+                            </button>
+                        </div>
+                    ))}
+
+                    {/* 참조가 2개를 넘어가면 하나씩 빼기가 번거로워진다 */}
+                    {referenceChipList.length + (referencedText ? 1 : 0) > 2 ? (
+                        <button type="button" onClick={onClearAllReferences}
+                                className="shrink-0 px-2 py-1 rounded-lg text-[11px] text-slate-500 dark:text-slate-400 hover:text-red-500 dark:hover:text-red-400 hover:bg-slate-200/70 dark:hover:bg-slate-800/60 transition">
+                            전체 해제
                         </button>
-                    </div>
+                    ) : null}
                 </div>
             ) : null}
 

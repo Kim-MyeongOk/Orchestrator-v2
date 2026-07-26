@@ -44,6 +44,7 @@ from typing                  import List
 from typing                  import Optional
 from redis.asyncio           import Redis
 from pydantic                import BaseModel
+from pydantic                import Field
 
 from langchain_core.messages           import BaseMessage
 from langchain_core.messages           import HumanMessage
@@ -257,6 +258,9 @@ class StreamRequest(BaseModel):
                                                 # 있으면 [참조 내용]/[질문] 두 블록으로 조합해 모델에 전달한다.
     preset_name       : Optional[str] = None    # LLM 파라미터 프리셋: LOW / MEDIUM / HIGH
                                                 # 지정 시 온도, top_p, max_tokens 등 하이퍼파라미터를 적용한다.
+    referenced_message_id_list : List[str] = Field(default_factory = list)
+                                                # 우클릭으로 통째로 고른 이전 답변들의 ID ("agent-0", "agent-3" …).
+                                                # 체크포인트에서 본문을 찾아 <referenced_context> 블록으로 묶어 전달한다.
 
 
 class TruncateThreadRequest(BaseModel):
@@ -271,6 +275,9 @@ class TruncateThreadRequest(BaseModel):
 class ServerApplication:
     BOOKMARK_MEMO_MAXIMUM_LENGTH   = 1000   # 북마크 메모 최대 길이 (기본값 : 1000)
     REFERENCED_TEXT_MAXIMUM_LENGTH = 2000   # 참조 발췌 최대 길이 (기본값 : 2000) — 프롬프트가 발췌로 뒤덮이는 것을 막는다
+    REFERENCED_MESSAGE_MAXIMUM_COUNT  = 10    # 통째로 참조할 수 있는 이전 답변 개수 (기본값 : 10)
+    REFERENCED_MESSAGE_MAXIMUM_LENGTH = 4000  # 참조 답변 1건당 최대 길이 (기본값 : 4000)
+    REFERENCED_MESSAGE_ID_PREFIX      = "agent-"   # 답변 ID 형식 : agent-{답변 순번(0부터)}
 
     def __init__(self) -> None:
         load_dotenv()
@@ -980,16 +987,88 @@ ALTER TABLE chat_bookmark ADD COLUMN IF NOT EXISTS memo TEXT;
             return CompressionResult.create_uncompressed()
 
     @staticmethod
-    def _build_referenced_message_text(message : str, referenced_text : Optional[str]) -> str:
-        # 참조 발췌가 있으면 [참조 내용] / [질문] 두 블록으로 조합한다.
+    def _parse_referenced_agent_index(referenced_message_id : str) -> Optional[int]:
+        # "agent-3" → 3. 형식이 어긋나면 None 을 돌려주고 호출부가 조용히 건너뛴다.
+        if not isinstance(referenced_message_id, str):
+            return None
+        if not referenced_message_id.startswith(ServerApplication.REFERENCED_MESSAGE_ID_PREFIX):
+            return None
+        index_text = referenced_message_id[len(ServerApplication.REFERENCED_MESSAGE_ID_PREFIX):]
+        if not index_text.isdigit():
+            return None
+        return int(index_text)
+
+    async def _collect_referenced_message_list_async(self, thread_id : str, referenced_message_id_list : List[str]) -> List[Dict[str, Any]]:
+        # 요청받은 답변 ID 들을 체크포인트 본문으로 바꿔 돌려준다.
+        #
+        # 유효하지 않은 ID(형식 오류·이미 사라진 순번)는 예외를 던지지 않고 건너뛴다.
+        # 질문 수정으로 대화가 잘리거나 다른 기기에서 방을 지우면 프론트가 들고 있던 순번이 실제로 없어질 수 있는데,
+        # 그때 질문 전체를 실패시키면 사용자는 이유를 알 수 없는 오류만 보게 된다.
+        requested_index_list = []
+        for referenced_message_id in referenced_message_id_list[:ServerApplication.REFERENCED_MESSAGE_MAXIMUM_COUNT]:
+            agent_index = ServerApplication._parse_referenced_agent_index(referenced_message_id)
+            if agent_index is None or agent_index in requested_index_list:
+                continue
+            requested_index_list.append(agent_index)
+        if not requested_index_list:
+            return []
+
+        try:
+            state_snapshot = await self._get_or_create_compiled_graph(None, None).aget_state({"configurable" : {"thread_id" : thread_id}})
+        except Exception as exception:
+            # 체크포인트를 못 읽어도 질문 자체는 진행시킨다 (참조만 빠진다)
+            print(f"REFERENCED MESSAGE LOOKUP FAILED : THREAD {thread_id} - {exception}", flush = True)
+            return []
+
+        # 표시용 순번과 같은 규칙으로 답변만 추린다 (get_thread_messages_async 와 동일 : 본문 없는 도구 호출 메시지는 제외)
+        agent_text_list = []
+        for message in (state_snapshot.values.get("messages", []) if state_snapshot else []):
+            if type(message).__name__ not in ("AIMessage", "AIMessageChunk"):
+                continue
+            body_text, _reasoning_text = _extract_message_texts(message)
+            if body_text:
+                agent_text_list.append(body_text)
+
+        # 사용자가 고른 순서가 아니라 대화 순서대로 넣는다 — 모델이 시간 흐름대로 읽는 편이 자연스럽다
+        referenced_message_list = []
+        for agent_index in sorted(requested_index_list):
+            if agent_index >= len(agent_text_list):
+                continue
+            referenced_message_list.append({
+                "agent_index" : agent_index,
+                "text"        : agent_text_list[agent_index][:ServerApplication.REFERENCED_MESSAGE_MAXIMUM_LENGTH]
+            })
+        return referenced_message_list
+
+    @staticmethod
+    def _build_referenced_context_block(referenced_message_list : List[Dict[str, Any]]) -> str:
+        # 통째로 고른 답변들을 <referenced_context> 태그로 묶는다.
+        # 태그로 감싸는 이유 : 질문 본문과 참조 자료의 경계를 모델이 확실히 구분하게 하려는 것이다.
+        if not referenced_message_list:
+            return ""
+        block_line_list = ["<referenced_context>"]
+        for referenced_message in referenced_message_list:
+            block_line_list.append(f"[답변 #{referenced_message['agent_index'] + 1}]")
+            block_line_list.append(referenced_message["text"])
+        block_line_list.append("</referenced_context>")
+        return "\n".join(block_line_list)
+
+    @staticmethod
+    def _build_referenced_message_text(message : str, referenced_text : Optional[str], referenced_context_block : str = "") -> str:
+        # 참조가 있으면 <referenced_context>(답변 통째로) → [참조 내용](드래그 발췌) → [질문] 순으로 조합한다.
         # 조합 결과를 그대로 HumanMessage 로 저장하는 이유 : 다음 턴에도 체크포인트에서 참조 맥락이 함께 복원되어야
         # "아까 그거"처럼 발췌를 가리키는 후속 질문이 이어진다.
-        if referenced_text is None:
+        trimmed_reference = (referenced_text or "").strip()
+        if not trimmed_reference and not referenced_context_block:
             return message
-        trimmed_reference = referenced_text.strip()
-        if not trimmed_reference:
-            return message
-        return f"[참조 내용]: {trimmed_reference[:ServerApplication.REFERENCED_TEXT_MAXIMUM_LENGTH]}\n[질문]: {message}"
+
+        composed_section_list = []
+        if referenced_context_block:
+            composed_section_list.append(referenced_context_block)
+        if trimmed_reference:
+            composed_section_list.append(f"[참조 내용]: {trimmed_reference[:ServerApplication.REFERENCED_TEXT_MAXIMUM_LENGTH]}")
+        composed_section_list.append(f"[질문]: {message}")
+        return "\n".join(composed_section_list)
 
     async def stream_async(self, stream_request : StreamRequest, authorization : Optional[str] = Header(None)) -> StreamingResponse:
         # 인증 + 스레드 소유권 검증 : 남의 스레드로 스트리밍(대화 이어쓰기) 방지
@@ -1000,8 +1079,12 @@ ALTER TABLE chat_bookmark ADD COLUMN IF NOT EXISTS memo TEXT;
         # 청크를 orch:{thread_id}:run:{run_id}:chunk_list 버퍼에 누적해 디버그 패널에서 추적할 수 있게 한다.
         run_id                 = str(uuid.uuid4())
         runnable_configuration = {"configurable" : {"thread_id" : stream_request.thread_id, "run_id" : run_id}}
-        composed_message_text  = ServerApplication._build_referenced_message_text(stream_request.message, stream_request.referenced_text)
-        input_dictionary       = {"messages" : [HumanMessage(content = composed_message_text)]}
+        # 우클릭으로 고른 이전 답변들을 체크포인트에서 찾아 <referenced_context> 로 묶는다 (없는 ID 는 조용히 빠진다)
+        referenced_message_list  = await self._collect_referenced_message_list_async(stream_request.thread_id, stream_request.referenced_message_id_list)
+        referenced_context_block = ServerApplication._build_referenced_context_block(referenced_message_list)
+        composed_message_text    = ServerApplication._build_referenced_message_text(
+            stream_request.message, stream_request.referenced_text, referenced_context_block)
+        input_dictionary         = {"messages" : [HumanMessage(content = composed_message_text)]}
         compiled_graph         = self._get_or_create_compiled_graph(stream_request.model, stream_request.reasoning_effort)
 
         # 대화 압축 : astream 이전에 요약을 만들어 chat_room 에 저장해 둔다.
