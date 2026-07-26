@@ -14,6 +14,7 @@ import { useChatStream } from "./hooks/useChatStream";
 import { useRooms }      from "./hooks/useRooms";
 import { useTheme }      from "./hooks/useTheme";
 import { useToast }      from "./hooks/useToast";
+import { useTTS }        from "./hooks/useTTS";
 
 import { getApiUrl }          from "./api/chatApi";
 import { getUserId }          from "./api/chatApi";
@@ -45,6 +46,8 @@ export default function App() {
 
     const rooms     = useRooms({ showToast });
     const bookmarks = useBookmarks({ showToast });
+    // speechSynthesis 는 창 전체에 하나뿐이라 훅도 여기서 한 번만 만든다 (말풍선마다 두면 재생 상태가 어긋난다)
+    const tts       = useTTS();
 
     const stream = useChatStream({
         appendMessage          : rooms.appendMessage,
@@ -158,9 +161,10 @@ export default function App() {
 
     const onSwitchRoom = useCallback((roomId) => {
         if (isStreaming) { showToast("⚠ 응답 중에는 다른 대화로 이동할 수 없습니다."); return; }
+        tts.stopSpeaking();   // 떠난 방의 답변을 계속 읽으면 정지 버튼이 화면에 없어 멈출 방법이 없다
         setScrollTargetAgentIndex(null);
         rooms.switchRoom(roomId);
-    }, [isStreaming, rooms, showToast]);
+    }, [isStreaming, rooms, showToast, tts]);
 
     const onDeleteRoom = useCallback((roomId) => {
         if (isStreaming) return;
@@ -236,6 +240,9 @@ export default function App() {
                     onBlockedEdit={() => showToast("⚠ 응답 중에는 질문을 수정할 수 없습니다.")}
                     onRetryError={onRetryError}
                     scrollTargetAgentIndex={scrollTargetAgentIndex}
+                    isSpeechSupported={tts.isSpeechSupported}
+                    speakingKey={tts.speakingKey}
+                    onToggleSpeak={tts.toggleSpeak}
                 />
 
                 <ChatInput inputValue={inputValue} onInputValueChange={setInputValue}

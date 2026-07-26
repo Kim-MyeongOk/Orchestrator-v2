@@ -45,6 +45,25 @@ export function BookmarkIcon({ isFilled }) {
     );
 }
 
+export function SpeakerIcon({ isSpeaking }) {
+    // 대기 : 스피커(음파) / 재생 중 : 정지 사각형
+    if (isSpeaking) {
+        return (
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5">
+                <rect x="6" y="6" width="12" height="12" rx="1.5" />
+            </svg>
+        );
+    }
+    return (
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
+            <path d="M11 5 6 9H3v6h3l5 4z" />
+            <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+            <path d="M18.5 5.5a9 9 0 0 1 0 13" />
+        </svg>
+    );
+}
+
 export function SunIcon() {
     return (
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
