@@ -139,7 +139,7 @@ export default function ChatMessageList({
                 <div className="text-center pt-10">
                     <p className="text-slate-400 dark:text-slate-600 text-sm">메시지를 보내 오케스트레이터와 대화를 시작하세요.</p>
                     <p className="text-slate-400/80 dark:text-slate-700 text-[11px] mt-1.5">
-                        백엔드 : <code className="font-mono">python src/server.py</code> (포트 8000)
+                        백엔드 : <code className="font-mono">python backend/server.py</code> (포트 8000)
                     </p>
                 </div>
             ) : messageElementList}

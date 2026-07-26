@@ -11,7 +11,7 @@
 #   - 오케스트레이터 그래프 : Tavily 검색 + 리서치 서브에이전트 + 이미지 재주입 미들웨어
 #   - 모니터 그래프         : ThinkTrimmingMiddleware (생각 토큰 트리밍/윈도잉), (모델, 강도)별 캐시
 #
-#   실행 : python src/server.py   (기본 포트 8000)
+#   실행 : python backend/server.py   (기본 포트 8000)
 ##################################################
 
 import os

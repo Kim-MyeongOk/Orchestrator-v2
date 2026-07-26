@@ -2,8 +2,8 @@
 # 체크포인트 Retention 독립 배치 엔트리포인트
 # FastAPI lifespan 과 격리된 단독 프로세스로, 외부 인프라 크론잡에서 호출한다.
 #
-#   실행   : python src/checkpoint_retention_batch.py   (프로젝트 루트 기준, .env 자동 로드)
-#   크론 예 : 0 4 * * *  cd /app && .venv/bin/python src/checkpoint_retention_batch.py
+#   실행   : python backend/checkpoint_retention_batch.py   (프로젝트 루트 기준, .env 자동 로드)
+#   크론 예 : 0 4 * * *  cd /app && .venv/bin/python backend/checkpoint_retention_batch.py
 #   종료코드: 0 = 정상, 1 = 실패 (크론 알림 연동용)
 #
 # 환경변수 :

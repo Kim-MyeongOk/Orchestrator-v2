@@ -1292,7 +1292,7 @@ function renderActiveRoom() {
     if (room.messages.length === 0) {
         messageFeed.innerHTML = `<div class="text-center pt-10">
             <p class="text-slate-400 dark:text-slate-600 text-sm">메시지를 보내 오케스트레이터와 대화를 시작하세요.</p>
-            <p class="text-slate-400/80 dark:text-slate-700 text-[11px] mt-1.5">백엔드 : <code class="font-mono">python src/server.py</code> (포트 8000)</p></div>`;
+            <p class="text-slate-400/80 dark:text-slate-700 text-[11px] mt-1.5">백엔드 : <code class="font-mono">python backend/server.py</code> (포트 8000)</p></div>`;
         return;
     }
     let userMessageIndex  = 0;   // 사용자 메시지 순번 : 질문 수정 시 체크포인트 절단 위치로 쓰인다

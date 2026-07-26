@@ -36,4 +36,4 @@ cache-dir = "C:\\.uv-cache"
 
 [tool.pytest.ini_options]
 testpaths  = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["backend"]
