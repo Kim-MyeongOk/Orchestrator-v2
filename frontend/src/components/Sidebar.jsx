@@ -14,7 +14,7 @@ const FIELD_LABEL_CLASS       = "block text-[11px] font-medium text-slate-500 da
 export default function Sidebar({
     userId, roomList, activeRoom, activeRoomId, isStreaming,
     sidebarTabName, onSidebarTabChange,
-    bookmarkList, onOpenBookmark, onRemoveBookmark,
+    bookmarkList, onOpenBookmark, onRemoveBookmark, onUpdateBookmarkMemo,
     onCreateRoom, onSwitchRoom, onRenameRoom, onDeleteRoom, onBlockedRename,
     modelNameList, defaultModelName, onModelChange, onReasoningEffortChange,
     isDeveloperMode, onToggleDeveloperMode, apiUrlText, onApiUrlChange,
@@ -54,7 +54,8 @@ export default function Sidebar({
                                 onSwitchRoom={onSwitchRoom} onRenameRoom={onRenameRoom}
                                 onDeleteRoom={onDeleteRoom} onBlockedRename={onBlockedRename} />
                     : <BookmarkList bookmarkList={bookmarkList} roomList={roomList}
-                                    onOpenBookmark={onOpenBookmark} onRemoveBookmark={onRemoveBookmark} />}
+                                    onOpenBookmark={onOpenBookmark} onRemoveBookmark={onRemoveBookmark}
+                                    onUpdateBookmarkMemo={onUpdateBookmarkMemo} />}
             </div>
 
             {/* 세션 설정 */}
