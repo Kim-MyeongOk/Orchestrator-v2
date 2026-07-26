@@ -9,6 +9,7 @@ import { CheckIcon }              from "./icons";
 import { CopyIcon }               from "./icons";
 import { SpeakerIcon }            from "./icons";
 import { CompletedMetaLine }      from "./MetaLine";
+import ReferenceableText          from "./ReferenceableText";
 
 const TOOLTIP_CLASS = "pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2 py-1 rounded-md "
                     + "bg-slate-800 dark:bg-slate-700 text-white text-[11px] whitespace-nowrap shadow-lg opacity-0 group-hover:opacity-100 transition z-20";
@@ -74,7 +75,7 @@ function AnswerSpeakButton({ isSpeaking, onToggle }) {
 
 export default function AgentMessage({
     message, agentIndex, isBookmarked, onToggleBookmark, isDeveloperMode, isHighlighted,
-    isSpeechSupported, isSpeaking, onToggleSpeak
+    isSpeechSupported, isSpeaking, onToggleSpeak, onQuoteText
 }) {
     const isEmptyAnswer = (message.text || "").trim() === "";
     const answerHtml    = useMemo(() => (isEmptyAnswer ? "" : renderMarkdownToHtml(message.text)), [message.text, isEmptyAnswer]);
@@ -96,9 +97,12 @@ export default function AgentMessage({
                         </details>
                     ) : null}
 
+                    {/* 본문만 참조 대상으로 감싼다 — 생각 과정은 모델의 중간 사고라 질문 문맥으로 담을 값이 아니다 */}
                     {isEmptyAnswer
                         ? <span className="text-slate-500 italic">(빈 응답 — 모델이 텍스트를 생성하지 않았습니다)</span>
-                        : <span className="md-body" dangerouslySetInnerHTML={{ __html : answerHtml }} />}
+                        : <ReferenceableText onQuote={onQuoteText}>
+                              <span className="md-body" dangerouslySetInnerHTML={{ __html : answerHtml }} />
+                          </ReferenceableText>}
                 </div>
 
                 <div className="flex items-center gap-1.5 mt-1 px-1 min-h-5">

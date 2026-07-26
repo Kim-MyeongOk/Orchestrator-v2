@@ -45,7 +45,7 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
         if (abortControllerRef.current) abortControllerRef.current.abort();
     }, []);
 
-    const executeStreamTurnAsync = useCallback(async (room, messageText) => {
+    const executeStreamTurnAsync = useCallback(async (room, messageText, referencedText = "") => {
         const formatElapsedSecondText = (startedAt) => ((performance.now() - startedAt) / 1000).toFixed(1);
 
         streamBufferRef.current = createEmptyStreamBuffer();
@@ -79,6 +79,7 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
                     message         : messageText,
                     model           : room.model,
                     reasoningEffort : room.reasoningEffort,
+                    referencedText  : referencedText,
                     signal          : abortControllerRef.current.signal,
                     onStart         : (runId) => { if (runId) setRoomLastRunId(room.roomId, runId); },
                     onReasoning     : (chunkText) => {
@@ -109,7 +110,7 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
                         appendMessage(room.roomId, buildAgentMessage());
                         appendMessage(room.roomId, { role : "error", text : shownErrorText });
                     } else {
-                        appendMessage(room.roomId, { role : "error", text : shownErrorText, retryMessageText : messageText });
+                        appendMessage(room.roomId, { role : "error", text : shownErrorText, retryMessageText : messageText, retryReferencedText : referencedText });
                     }
                     finalStatus = { text : "오류", toneClass : "bg-red-500" };
                     showToast(`⚠ ${isDeveloperMode ? streamErrorText : "서버 응답 오류 — 잠시 후 다시 시도해주세요."}`);
@@ -152,7 +153,7 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
                     shownErrorText = `${failReasonText} — 자동 재시도 ${attemptCount}회 모두 실패했거나 재시도할 수 없는 오류입니다.`;
                 }
                 if (hasReceivedAnyText()) appendMessage(room.roomId, buildAgentMessage());
-                appendMessage(room.roomId, { role : "error", text : shownErrorText, retryMessageText : messageText });
+                appendMessage(room.roomId, { role : "error", text : shownErrorText, retryMessageText : messageText, retryReferencedText : referencedText });
                 finalStatus = { text : "오류", toneClass : "bg-red-500" };
                 showToast(`⚠ ${failReasonText}\n백엔드(포트 8000) 실행 여부를 확인한 뒤 '다시 시도'를 눌러주세요.`);
                 break;
@@ -167,11 +168,12 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
         return finalStatus;
     }, [appendMessage, cancelPendingFlush, isDeveloperMode, scheduleStreamFlush, setRoomLastRunId, showToast]);
 
-    const sendMessageAsync = useCallback(async (room, messageText) => {
+    const sendMessageAsync = useCallback(async (room, messageText, referencedText = "") => {
         // 사용자 메시지를 먼저 확정 저장한 뒤 스트리밍을 시작한다 (첫 메시지는 방 제목이 된다)
-        appendMessage(room.roomId, { role : "user", text : messageText });
+        // referencedText 는 말풍선에 인용 블록으로 보여주기 위해 함께 저장한다 (제목에는 쓰지 않는다)
+        appendMessage(room.roomId, { role : "user", text : messageText, referencedText : referencedText || "" });
         applyFirstMessageTitle(room.roomId, messageText);
-        return executeStreamTurnAsync(room, messageText);
+        return executeStreamTurnAsync(room, messageText, referencedText);
     }, [appendMessage, applyFirstMessageTitle, executeStreamTurnAsync]);
 
     return { isStreaming, streamingState, sendMessageAsync, executeStreamTurnAsync, stopStreaming };
