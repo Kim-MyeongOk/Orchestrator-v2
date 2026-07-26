@@ -1,0 +1,50 @@
+LOW:
+  temperature: 0.25
+  max_completion_tokens: 512
+  timeout: 120
+  max_retries: 3
+  stream_usage: true
+  default_headers: {}
+  extra_body: {}
+  top_p: 0.85
+  num_return_sequences: 1
+
+MEDIUM:
+  temperature: 0.75
+  max_completion_tokens: 512
+  timeout: 120
+  max_retries: 3
+  stream_usage: true
+  default_headers: {}
+  extra_body: {}
+  top_p: 0.93
+  num_return_sequences: 8
+  thinking:
+    temperature: 0.9
+    top_p: 0.95
+    max_completion_tokens: 300
+    num_return_sequences: 8
+  answer:
+    temperature: 0.25
+    top_p: 0.9
+    max_completion_tokens: 120
+
+HIGH:
+  temperature: 0.95
+  max_completion_tokens: 512
+  timeout: 120
+  max_retries: 3
+  stream_usage: true
+  default_headers: {}
+  extra_body: {}
+  top_p: 0.98
+  num_return_sequences: 8
+  thinking:
+    temperature: 0.95
+    top_p: 0.98
+    max_completion_tokens: 500
+    num_return_sequences: 8
+  answer:
+    temperature: 0.85
+    top_p: 0.95
+    max_completion_tokens: 256

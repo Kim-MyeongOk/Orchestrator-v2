@@ -16,12 +16,13 @@ import { useTheme }      from "./hooks/useTheme";
 import { useToast }      from "./hooks/useToast";
 import { useTTS }        from "./hooks/useTTS";
 
-import { getApiUrl }          from "./api/chatApi";
-import { getUserId }          from "./api/chatApi";
-import { listModelsAsync }    from "./api/chatApi";
-import { logout }             from "./api/chatApi";
-import { setApiUrl }          from "./api/chatApi";
-import { truncateThreadAsync } from "./api/chatApi";
+import { getApiUrl }             from "./api/chatApi";
+import { getUserId }             from "./api/chatApi";
+import { listModelsAsync }       from "./api/chatApi";
+import { listModelPresetsAsync } from "./api/chatApi";
+import { logout }                from "./api/chatApi";
+import { setApiUrl }             from "./api/chatApi";
+import { truncateThreadAsync }   from "./api/chatApi";
 
 import { DEVELOPER_MODE_STORAGE_KEY } from "./constants/storageKeys";
 
@@ -34,6 +35,7 @@ export default function App() {
 
     const [inputValue, setInputValue]                     = useState("");
     const [referencedText, setReferencedText]             = useState("");   // 답변에서 「참조하기」로 담은 발췌 (전송 후 비운다)
+    const [presetName, setPresetName]                     = useState("MEDIUM");   // LLM 파라미터 프리셋 (LOW/MEDIUM/HIGH)
     const [sidebarTabName, setSidebarTabName]             = useState("rooms");
     const [isResetModalOpen, setIsResetModalOpen]         = useState(false);
     const [scrollTargetAgentIndex, setScrollTargetAgentIndex] = useState(null);
@@ -41,6 +43,7 @@ export default function App() {
     const [apiUrlText, setApiUrlText]                     = useState(getApiUrl());
     const [modelNameList, setModelNameList]               = useState([]);
     const [defaultModelName, setDefaultModelName]         = useState("");
+    const [availablePresetNames, setAvailablePresetNames] = useState([]);   // LLM 파라미터 프리셋 목록 (LOW/MEDIUM/HIGH)
     const [isDeveloperMode, setIsDeveloperMode]           = useState(
         () => localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === "on"
     );
@@ -92,6 +95,28 @@ export default function App() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [apiUrlText]);
 
+    /* ── LLM 파라미터 프리셋 목록 ── */
+
+    useEffect(() => {
+        let isCancelled = false;
+
+        const loadPresetsAsync = async () => {
+            try {
+                const { availablePresetNames : loadedPresetNames } = await listModelPresetsAsync();
+                if (isCancelled) return;
+                setAvailablePresetNames(loadedPresetNames);
+            } catch (error) {
+                if (isCancelled) return;
+                // 프리셋 로드 실패는 조용히 처리 (기본값 MEDIUM으로 계속 동작)
+                console.warn("Failed to load model presets:", error.message);
+            }
+        };
+        loadPresetsAsync();
+
+        return () => { isCancelled = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [apiUrlText]);
+
     /* ── 개발자 모드 ── */
 
     const onToggleDeveloperMode = useCallback(() => {
@@ -113,17 +138,19 @@ export default function App() {
         const messageText = inputValue.trim();
         if (!messageText || isStreaming || !activeRoom) return;
         const sentReferencedText = referencedText;
+        const sentPresetName = presetName;
         setInputValue("");
-        setReferencedText("");   // 참조는 한 턴만 따라간다 (다음 질문에 의도치 않게 달라붙지 않도록)
-        const finalStatus = await stream.sendMessageAsync(activeRoom, messageText, sentReferencedText);
+        setReferencedText("");   // 참조는 한 턴만 따아간다 (다음 질문에 의도치 않게 달라붙지 않도록)
+        // 프리셋은 유지한다 (사용자가 명시적으로 변경할 때까지)
+        const finalStatus = await stream.sendMessageAsync(activeRoom, messageText, sentReferencedText, sentPresetName);
         setStatusInfo(finalStatus);
-    }, [activeRoom, inputValue, isStreaming, referencedText, stream]);
+    }, [activeRoom, inputValue, isStreaming, referencedText, presetName, stream]);
 
     const onRetryError = useCallback(async (errorMessage) => {
         if (isStreaming || !activeRoom) return;
         rooms.removeErrorMessage(activeRoom.roomId, errorMessage.text);
-        // 실패한 턴에 붙어 있던 참조를 그대로 다시 실어 보낸다
-        const finalStatus = await stream.executeStreamTurnAsync(activeRoom, errorMessage.retryMessageText, errorMessage.retryReferencedText || "");
+        // 실패한 턴에 붙어 있던 참조와 프리셋을 그대로 다시 실어 보낸다
+        const finalStatus = await stream.executeStreamTurnAsync(activeRoom, errorMessage.retryMessageText, errorMessage.retryReferencedText || "", errorMessage.retryPresetName || "MEDIUM");
         setStatusInfo(finalStatus);
     }, [activeRoom, isStreaming, rooms, stream]);
 
@@ -261,7 +288,8 @@ export default function App() {
 
                 <ChatInput inputValue={inputValue} onInputValueChange={setInputValue}
                            onSend={onSend} onStop={stream.stopStreaming} isStreaming={isStreaming}
-                           referencedText={referencedText} onClearReference={() => setReferencedText("")} />
+                           referencedText={referencedText} onClearReference={() => setReferencedText("")}
+                           presetName={presetName} onPresetNameChange={setPresetName} availablePresetNames={availablePresetNames} />
             </main>
 
             <ToastContainer toastList={toastList} onDismiss={dismissToast} />

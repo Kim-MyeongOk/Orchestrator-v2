@@ -58,6 +58,7 @@ from common.cache.redis_stream.redis_client_factory            import RedisClien
 from common.cache.redis_stream.redis_configuration_factory     import RedisConfigurationFactory
 from common.security.password_helper                           import PasswordHelper
 from common.security.auth_token_helper                         import AuthTokenHelper
+from common.config.model_preset_loader                         import ModelPresetLoader
 from app.auth.user_schema_initializer                          import UserSchemaInitializer
 from app.auth.user_repository                                  import UserRepository
 from app.llm.job.job_configuration                             import JobConfiguration
@@ -76,6 +77,9 @@ from app.llm.job.job_subscription.job_subscription             import JobSubscri
 from app.llm.job.job_manager.job_reaper                        import JobReaper
 from app.llm.api.llm_api_router                                import LLMAPIRouter
 from app.llm.api.chat_api_router                               import ChatAPIRouter
+from app.llm.api.model_preset_response                         import ModelPreset
+from app.llm.api.model_preset_response                         import ModelPresetsResponse
+from app.llm.api.model_preset_response                         import ParameterSet
 from app.llm.chat.chat_query_service                           import ChatQueryService
 from common.database.postgresql.postgresql_configuration       import PostgresqlConfiguration
 from common.cache.redis_stream.redis_configuration             import RedisConfiguration
@@ -251,6 +255,8 @@ class StreamRequest(BaseModel):
                                                 # False : 답변 토큰만 평문 스트림 (기존 클라이언트 하위호환)
     referenced_text   : Optional[str] = None    # 이전 답변에서 드래그해 "참조하기"로 담은 발췌.
                                                 # 있으면 [참조 내용]/[질문] 두 블록으로 조합해 모델에 전달한다.
+    preset_name       : Optional[str] = None    # LLM 파라미터 프리셋: LOW / MEDIUM / HIGH
+                                                # 지정 시 온도, top_p, max_tokens 등 하이퍼파라미터를 적용한다.
 
 
 class TruncateThreadRequest(BaseModel):
@@ -392,6 +398,7 @@ class ServerApplication:
         # 모니터 라우트 (루트 경로 — Job 라우터와 경로가 겹치지 않는다)
         self.application.add_api_route("/diagnose",                     self.diagnose_thread_async,     methods = ["GET"])
         self.application.add_api_route("/models",                       self.list_models_async,         methods = ["GET"])
+        self.application.add_api_route("/config/presets",              self.list_model_presets_async,  methods = ["GET"])
         self.application.add_api_route("/stream",                       self.stream_async,              methods = ["POST"])
         self.application.add_api_route("/rooms",                        self.list_rooms_async,          methods = ["GET"])
         self.application.add_api_route("/rooms",                        self.upsert_room_async,         methods = ["POST"])
@@ -664,6 +671,34 @@ ALTER TABLE chat_bookmark ADD COLUMN IF NOT EXISTS memo TEXT;
         except Exception as exception:
             raise HTTPException(status_code = 502, detail = f"OLLAMA MODEL LIST FAILED : {exception}")
         return {"default_model" : default_model, "models" : model_name_list, "provider" : model_provider}
+
+    async def list_model_presets_async(self) -> ModelPresetsResponse:
+        # LLM 모델 파라미터 프리셋 목록 반환 (LOW / MEDIUM / HIGH)
+        presets_dictionary = ModelPresetLoader.load_presets()
+        presets_object_dictionary = {}
+        for preset_name, preset_params in presets_dictionary.items():
+            # 부분 파라미터 세트 (thinking, answer) 변환
+            thinking_params = preset_params.get("thinking")
+            answer_params   = preset_params.get("answer")
+            thinking_object = ParameterSet(**thinking_params) if thinking_params else None
+            answer_object   = ParameterSet(**answer_params) if answer_params else None
+            # 메인 프리셋 객체 생성
+            preset_object = ModelPreset(
+                name                 = preset_name,
+                temperature          = preset_params.get("temperature", 0.5),
+                top_p                = preset_params.get("top_p", 0.9),
+                max_completion_tokens = preset_params.get("max_completion_tokens", 512),
+                timeout              = preset_params.get("timeout", 120),
+                max_retries          = preset_params.get("max_retries", 3),
+                stream_usage         = preset_params.get("stream_usage", True),
+                default_headers      = preset_params.get("default_headers", {}),
+                extra_body           = preset_params.get("extra_body", {}),
+                num_return_sequences = preset_params.get("num_return_sequences", 1),
+                thinking             = thinking_object,
+                answer               = answer_object
+            )
+            presets_object_dictionary[preset_name] = preset_object
+        return ModelPresetsResponse(presets = presets_object_dictionary, available_preset_names = list(presets_object_dictionary.keys()))
 
     async def list_rooms_async(self, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
         # 인증된 사용자의 방 목록만 반환한다 (스코핑 키는 요청값이 아니라 토큰의 user_id)

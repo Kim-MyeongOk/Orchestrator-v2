@@ -173,7 +173,7 @@ export async function listModelsAsync() {
 
 /* ══════════════════ 스트리밍 (NDJSON) ══════════════════ */
 
-export async function streamChatTurnAsync({ threadId, message, model, reasoningEffort, referencedText, signal, onStart, onReasoning, onToken, onStreamError }) {
+export async function streamChatTurnAsync({ threadId, message, model, reasoningEffort, referencedText, presetName, signal, onStart, onReasoning, onToken, onStreamError }) {
     // NDJSON 이벤트 스트림을 읽어 콜백으로 흘려보낸다.
     //   {"type":"start","run_id":...}     → onStart
     //   {"type":"reasoning","text":...}   → onReasoning (생각 과정)
@@ -188,7 +188,8 @@ export async function streamChatTurnAsync({ threadId, message, model, reasoningE
             model             : model || null,
             reasoning_effort  : reasoningEffort || null,
             include_reasoning : true,
-            referenced_text   : referencedText || null   // 서버가 [참조 내용]/[질문] 형태로 조합한다
+            referenced_text   : referencedText || null,   // 서버가 [참조 내용]/[질문] 형태로 조합한다
+            preset_name       : presetName || null        // LLM 파라미터 프리셋 (LOW/MEDIUM/HIGH)
         }),
         signal : signal
     });
@@ -234,4 +235,15 @@ export async function streamChatTurnAsync({ threadId, message, model, reasoningE
         completeLineList.forEach(dispatchEventLine);
     }
     dispatchEventLine(lineBuffer);   // 종료 후 잔여 버퍼 처리
+}
+
+/* ══════════════════ 모델 파라미터 프리셋 ══════════════════ */
+
+export async function listModelPresetsAsync() {
+    // 프론트엔드 프리셋 선택 드롭다운용. 서버에서 LOW/MEDIUM/HIGH 프리셋 목록을 가져온다.
+    const result = await readJsonOrThrowAsync(await fetch(`${apiBaseUrl}/config/presets`));
+    return {
+        presets: result.presets,   // { "LOW": { ... }, "MEDIUM": { ... }, "HIGH": { ... } }
+        availablePresetNames: result.available_preset_names   // ["LOW", "MEDIUM", "HIGH"]
+    };
 }
