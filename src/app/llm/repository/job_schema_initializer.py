@@ -2,13 +2,6 @@ from common.database.postgresql.postgresql_pool_manager import PostgresqlPoolMan
 
 class JobSchemaInitializer:
     SCHEMA_DDL = """
-CREATE TABLE IF NOT EXISTS llm_schema_migration
-(
-    version    INTEGER      PRIMARY KEY,
-    name       VARCHAR(200) NOT NULL,
-    applied_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
 -- 작업 마스터
 CREATE TABLE IF NOT EXISTS llm_job
 (
