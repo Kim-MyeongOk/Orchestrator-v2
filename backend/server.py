@@ -59,6 +59,8 @@ from common.cache.redis_stream.redis_client_factory            import RedisClien
 from common.cache.redis_stream.redis_configuration_factory     import RedisConfigurationFactory
 from common.security.password_helper                           import PasswordHelper
 from common.security.auth_token_helper                         import AuthTokenHelper
+from common.security.auth_secret_helper                        import AuthSecretHelper
+from common.security.auth_token_renewal_middleware             import AuthTokenRenewalMiddleware
 from common.config.model_preset_loader                         import ModelPresetLoader
 from app.auth.user_schema_initializer                          import UserSchemaInitializer
 from app.auth.user_repository                                  import UserRepository
@@ -299,11 +301,13 @@ class ServerApplication:
         self.compression_configuration       = ServerApplication._get_context_compression_configuration()
         self.conversation_summary_repository = None
         self.conversation_summarizer         = None
-        # 인증 토큰 : AUTH_TOKEN_SECRET 미설정 시 프로세스 임시 비밀키(재시작 시 기존 토큰 무효화)
-        self.auth_token_secret           = os.getenv("AUTH_TOKEN_SECRET") or secrets.token_hex(32)
+        # 인증 토큰 : 비밀키는 재시작해도 같은 값이어야 한다.
+        # 예전에는 환경변수가 없으면 매 기동마다 secrets.token_hex() 로 새로 만들었는데,
+        # 그 탓에 서버를 재시작할 때마다 발급해 둔 토큰이 전부 서명 검증에 실패해 사용자가 로그아웃됐다.
+        # 이제 환경변수 > 로컬 파일 > (없으면) 새로 만들어 파일에 저장 순으로 고정 값을 확보한다.
+        self.auth_token_secret           = AuthSecretHelper.resolve_secret(
+            os.getenv("AUTH_TOKEN_SECRET"), os.getenv("AUTH_TOKEN_SECRET_FILE_PATH", ".auth_token_secret"))
         self.auth_token_ttl_second_count = int(os.getenv("AUTH_TOKEN_TTL_SECOND_COUNT", "604800"))   # 기본 7일
-        if not os.getenv("AUTH_TOKEN_SECRET"):
-            print("WARNING : AUTH_TOKEN_SECRET NOT SET - USING EPHEMERAL SECRET (TOKENS INVALIDATE ON RESTART)", flush = True)
         self.job_transfer            = JobTransfer(
             self.postgresql_pool_manager,
             self.redis_stream_client,
@@ -394,7 +398,19 @@ class ServerApplication:
 
         self.application = FastAPI(title = "LLM Orchestrator (Job Service + Monitor)", lifespan = self.lifespan_async)
         # 개발용 API 테스트 페이지(/dev/api-client)·로컬 진단 대시보드에서의 교차 출처 호출 허용
-        self.application.add_middleware(CORSMiddleware, allow_origins = ["*"], allow_methods = ["*"], allow_headers = ["*"], expose_headers = ["X-Run-Id", "X-Thread-Id"])
+        # 토큰 자동 연장 : 인증된 요청이 지나갈 때 남은 수명이 절반 아래면 새 토큰을 헤더로 함께 내려준다.
+        # (CORS 보다 먼저 등록해야 CORS 가 바깥쪽에 놓여 여기서 붙인 헤더까지 노출 처리된다)
+        self.application.add_middleware(AuthTokenRenewalMiddleware,
+                                        secret           = self.auth_token_secret,
+                                        ttl_second_count = self.auth_token_ttl_second_count)
+        # allow_credentials 는 켜지 않는다 : 이 서비스는 쿠키가 아니라 Authorization: Bearer 헤더로 인증한다.
+        # (allow_origins=["*"] 와 allow_credentials=True 는 브라우저가 거부하는 조합이기도 하다)
+        # 프론트가 갱신 토큰 헤더를 읽으려면 expose_headers 에 반드시 들어가 있어야 한다.
+        self.application.add_middleware(CORSMiddleware,
+                                        allow_origins  = os.getenv("CORS_ALLOW_ORIGIN_LIST", "*").split(","),
+                                        allow_methods  = ["*"],
+                                        allow_headers  = ["*"],
+                                        expose_headers = ["X-Run-Id", "X-Thread-Id", AuthTokenRenewalMiddleware.REFRESHED_TOKEN_HEADER_NAME])
         # Job 서비스 라우터 (prefix : /llm, /api/v1/orchestrator)
         self.application.include_router(self.llm_api_router.get_router())
         self.application.include_router(self.chat_api_router.get_router())

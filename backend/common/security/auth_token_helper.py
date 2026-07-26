@@ -35,6 +35,29 @@ class AuthTokenHelper:
         return f"{payload_segment}.{signature_segment}"
 
     @staticmethod
+    def _read_verified_payload(token : str, secret : str) -> Optional[dict]:
+        # 서명·형식을 검증하고 payload 를 돌려준다 (만료 여부는 판단하지 않는다). 무효면 None.
+        if not isinstance(token, str) or token.count(".") != 1:
+            return None
+        payload_segment, signature_segment = token.split(".")
+        expected_signature = AuthTokenHelper._sign(payload_segment, secret)
+        if not hmac.compare_digest(expected_signature, signature_segment):
+            return None
+        try:
+            return json.loads(AuthTokenHelper._base64url_decode(payload_segment))
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def read_remaining_second_count(token : str, secret : str) -> Optional[int]:
+        # 남은 유효 시간(초). 무효·만료 토큰은 None — 슬라이딩 갱신 시점을 판단하는 데 쓴다.
+        payload_dictionary = AuthTokenHelper._read_verified_payload(token, secret)
+        if payload_dictionary is None:
+            return None
+        remaining_second_count = int(payload_dictionary.get("exp", 0)) - int(time.time())
+        return remaining_second_count if remaining_second_count > 0 else None
+
+    @staticmethod
     def verify_token(token : str, secret : str) -> Optional[str]:
         # 서명·만료를 검증하고 user_id 를 반환한다. 무효/만료/형식오류는 None.
         if not isinstance(token, str) or token.count(".") != 1:

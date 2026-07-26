@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import { useEffect }   from "react";
+import { useRef }      from "react";
 import { useState }    from "react";
 
 import ChatHeader        from "./components/ChatHeader";
@@ -18,14 +19,17 @@ import { useToast }      from "./hooks/useToast";
 import { useTTS }        from "./hooks/useTTS";
 
 import { getApiUrl }             from "./api/chatApi";
+import { getAuthToken }          from "./api/chatApi";
 import { getUserId }             from "./api/chatApi";
 import { listModelsAsync }       from "./api/chatApi";
 import { listModelPresetsAsync } from "./api/chatApi";
 import { logout }                from "./api/chatApi";
-import { setApiUrl }             from "./api/chatApi";
-import { truncateThreadAsync }   from "./api/chatApi";
+import { setApiUrl }              from "./api/chatApi";
+import { takeLogoutReasonText }   from "./api/chatApi";
+import { truncateThreadAsync }    from "./api/chatApi";
 
 import { DEVELOPER_MODE_STORAGE_KEY } from "./constants/storageKeys";
+import { INPUT_DRAFT_STORAGE_KEY }    from "./constants/storageKeys";
 
 const IDLE_STATUS      = { text : "대기",   toneClass : "bg-slate-400 dark:bg-slate-600" };
 const STREAMING_STATUS = { text : "응답 중", toneClass : "bg-emerald-400 animate-pulse" };
@@ -33,11 +37,17 @@ const STREAMING_STATUS = { text : "응답 중", toneClass : "bg-emerald-400 anim
 const REFERENCE_MAXIMUM_COUNT          = 10;   // 한 번에 담을 수 있는 답변 참조 개수 (서버 상한과 맞춘다)
 const REFERENCE_PREVIEW_MAXIMUM_LENGTH = 120;  // 칩 툴팁에 보여줄 답변 미리보기 길이
 
+// 세션 만료 안내 문구는 모듈이 로드될 때 한 번만 꺼내 온다.
+// 컴포넌트 안에서 꺼내면 StrictMode 의 이중 마운트 때 첫 마운트가 값을 소비해 버리고,
+// 실제로 화면에 남는 두 번째 마운트는 빈 값을 읽어 안내가 뜨지 않는다.
+const INITIAL_LOGOUT_REASON_TEXT = takeLogoutReasonText();
+
 export default function App() {
     const { isDarkTheme, toggleTheme }            = useTheme();
     const { toastList, showToast, dismissToast }  = useToast();
 
-    const [inputValue, setInputValue]                     = useState("");
+    // 세션이 만료돼 로그인 페이지로 튕겼다 돌아와도 쓰던 문장을 잃지 않도록 초안을 복원한다
+    const [inputValue, setInputValue]                     = useState(() => localStorage.getItem(INPUT_DRAFT_STORAGE_KEY) || "");
     const [referencedText, setReferencedText]             = useState("");   // 답변에서 「참조하기」로 담은 발췌 (전송 후 비운다)
     // 우클릭으로 통째로 담은 이전 답변들 : [{ messageId, agentIndex, previewText }] (전송 후 비운다)
     const [selectedReferenceList, setSelectedReferenceList] = useState([]);
@@ -53,6 +63,9 @@ export default function App() {
     const [isDeveloperMode, setIsDeveloperMode]           = useState(
         () => localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === "on"
     );
+
+    // 전송 중에는 초안 자동 삭제를 막는다 (401 로 튕길 때 보낸 문장을 되살리기 위함)
+    const isSendInFlightRef = useRef(false);
 
     const rooms     = useRooms({ showToast });
     const bookmarks = useBookmarks({ showToast });
@@ -73,6 +86,23 @@ export default function App() {
     const { isStreaming } = stream;
 
     useEffect(() => { setStatusInfo(isStreaming ? STREAMING_STATUS : IDLE_STATUS); }, [isStreaming]);
+
+    /* ── 세션 만료 대비 : 입력 초안 보관 + 만료 안내 ── */
+
+    // 입력할 때마다 초안을 남긴다. 401 로 튕겨도 다시 들어오면 그대로 이어서 쓸 수 있다.
+    //
+    // 전송으로 입력창이 비는 경우에는 초안을 지우지 않는다.
+    // 전송이 401 로 끝나면 방금 보낸 문장까지 잃어버리기 때문이다 (지우는 시점은 턴이 끝난 뒤).
+    useEffect(() => {
+        if (inputValue) { localStorage.setItem(INPUT_DRAFT_STORAGE_KEY, inputValue); return; }
+        if (!isSendInFlightRef.current) localStorage.removeItem(INPUT_DRAFT_STORAGE_KEY);
+    }, [inputValue]);
+
+    // 세션 만료로 로그아웃됐던 경우에만 사유를 한 번 안내한다 (직접 로그아웃한 경우에는 뜨지 않는다)
+    useEffect(() => {
+        if (INITIAL_LOGOUT_REASON_TEXT) showToast(`⚠ ${INITIAL_LOGOUT_REASON_TEXT}`);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     /* ── 모델 목록 : 백엔드보다 페이지를 먼저 연 경우를 위해 지수 백오프로 재시도한다 ── */
 
@@ -151,12 +181,17 @@ export default function App() {
             presetName              : presetName
         };
         stt.stopRecording();   // 받아쓰기가 켜진 채로 두면 방금 비운 입력창에 보낸 문장이 되살아난다
+        isSendInFlightRef.current = true;   // 턴이 끝날 때까지 초안을 지키게 한다
         setInputValue("");
         // 참조는 한 턴만 따라간다 (다음 질문에 의도치 않게 달라붙지 않도록).
         // 프리셋은 유지한다 (사용자가 명시적으로 바꿀 때까지).
         setReferencedText("");
         setSelectedReferenceList([]);
         const finalStatus = await stream.sendMessageAsync(activeRoom, messageText, sentTurnOption);
+        isSendInFlightRef.current = false;
+        // 턴 도중 401 로 로그아웃됐으면 초안을 남겨 둔다 (다시 로그인하면 그대로 이어서 쓸 수 있다).
+        // location.replace() 는 실행을 즉시 멈추지 않아 이 줄까지 흘러오므로, 토큰이 남아 있는지로 판별한다.
+        if (getAuthToken()) localStorage.removeItem(INPUT_DRAFT_STORAGE_KEY);
         setStatusInfo(finalStatus);
     }, [activeRoom, inputValue, isStreaming, referencedText, selectedReferenceList, presetName, stream, stt]);
 
