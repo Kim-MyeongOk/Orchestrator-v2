@@ -3,6 +3,11 @@ import { AUTH_USER_ID_STORAGE_KEY } from "../constants/storageKeys";
 import { USER_ID_STORAGE_KEY }      from "../constants/storageKeys";
 import { API_URL_STORAGE_KEY }      from "../constants/storageKeys";
 import { LOGIN_PAGE_PATH }          from "../constants/storageKeys";
+import { LOGOUT_REASON_STORAGE_KEY } from "../constants/storageKeys";
+import { INPUT_DRAFT_STORAGE_KEY }   from "../constants/storageKeys";
+
+// 서버가 토큰을 자동 연장할 때 실어 보내는 헤더 (백엔드 AuthTokenRenewalMiddleware 와 이름을 맞춘다)
+const REFRESHED_AUTH_TOKEN_HEADER_NAME = "X-Refreshed-Auth-Token";
 
 /* ══════════════════ 백엔드 베이스 URL ══════════════════
    우선순위 : 개발자 모드에서 저장한 값 > .env 의 VITE_API_URL > localhost:8000 */
@@ -24,22 +29,42 @@ export function getAuthToken() { return localStorage.getItem(AUTH_TOKEN_STORAGE_
 
 export function getUserId() { return localStorage.getItem(AUTH_USER_ID_STORAGE_KEY) || "anonymous"; }
 
-export function logout() {
-    // 인증 정보를 지우고 로그인 페이지로 이동한다 (방 목록은 서버에 남아 다음 로그인 시 복원)
+export function logout(logoutReasonText = "") {
+    // 인증 정보를 지우고 로그인 페이지로 이동한다 (방 목록은 서버에 남아 다음 로그인 시 복원).
+    // 세션 만료처럼 사용자가 의도하지 않은 로그아웃이면 사유를 남겨, 다시 들어왔을 때 안내할 수 있게 한다.
+    // 사유 없는 로그아웃 = 사용자가 직접 누른 것이므로 작성 중이던 초안도 함께 지운다
+    // (세션 만료로 튕긴 경우에는 남겨 두었다가 다시 들어왔을 때 복원한다)
+    if (logoutReasonText) localStorage.setItem(LOGOUT_REASON_STORAGE_KEY, logoutReasonText);
+    else                  localStorage.removeItem(INPUT_DRAFT_STORAGE_KEY);
     localStorage.removeItem(AUTH_USER_ID_STORAGE_KEY);
     localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
     localStorage.removeItem(USER_ID_STORAGE_KEY);
     location.replace(LOGIN_PAGE_PATH);
 }
 
+export function takeLogoutReasonText() {
+    // 한 번 읽으면 지운다 (새로고침할 때마다 같은 안내가 다시 뜨지 않도록)
+    const logoutReasonText = localStorage.getItem(LOGOUT_REASON_STORAGE_KEY) || "";
+    if (logoutReasonText) localStorage.removeItem(LOGOUT_REASON_STORAGE_KEY);
+    return logoutReasonText;
+}
+
 export class NonRetryableError extends Error {}   // 4xx 등 재시도가 무의미한 오류
 
+function applyRefreshedAuthToken(response) {
+    // Silent Refresh : 서버가 남은 수명이 절반 아래인 토큰을 보면 새 토큰을 헤더로 함께 내려준다.
+    // 여기서 조용히 갈아끼우므로, 계속 쓰는 동안에는 만료로 튕기지 않는다.
+    const refreshedToken = response.headers.get(REFRESHED_AUTH_TOKEN_HEADER_NAME);
+    if (refreshedToken) localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, refreshedToken);
+}
+
 async function authFetch(pathText, init = {}) {
-    // 인증 토큰을 Authorization 헤더로 실어 요청한다. 401(만료·무효) 이면 로그아웃 처리.
+    // 인증 토큰을 Authorization 헤더로 실어 요청한다. 401(만료·무효) 이면 사유를 남기고 로그아웃한다.
     const headerDictionary = Object.assign({}, init.headers || {}, { "Authorization" : `Bearer ${getAuthToken()}` });
     const response         = await fetch(`${apiBaseUrl}${pathText}`, Object.assign({}, init, { headers : headerDictionary }));
+    applyRefreshedAuthToken(response);
     if (response.status === 401) {
-        logout();
+        logout("세션이 만료되어 다시 로그인했습니다. 작성 중이던 내용은 그대로 남아 있습니다.");
         throw new NonRetryableError("UNAUTHORIZED");
     }
     return response;
