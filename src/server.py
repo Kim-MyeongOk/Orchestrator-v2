@@ -211,6 +211,16 @@ class RoomUpsertRequest(BaseModel):
     reasoning_effort : Optional[str]  = None
 
 
+class BookmarkUpsertRequest(BaseModel):
+    # 북마크 대상은 "방 안에서 몇 번째 답변인가"(agent_index) 로 식별한다.
+    # thread_id 는 대화 전체를 가리키는 값이라 답변 하나를 지목할 수 없어 쓰지 않는다.
+    bookmark_id  : str
+    room_id      : str
+    agent_index  : int
+    text         : str            = ""     # 목록 미리보기용 스냅샷 (체크포인트를 열지 않고 사이드바를 그리기 위함)
+    completed_at : Optional[int]  = None   # 답변 완료 시각 (epoch ms)
+
+
 class StreamRequest(BaseModel):
     thread_id         : str
     message           : str
@@ -356,6 +366,9 @@ class ServerApplication:
         self.application.add_api_route("/rooms",                        self.list_rooms_async,          methods = ["GET"])
         self.application.add_api_route("/rooms",                        self.upsert_room_async,         methods = ["POST"])
         self.application.add_api_route("/rooms/{room_id}",              self.delete_room_async,         methods = ["DELETE"])
+        self.application.add_api_route("/bookmarks",                    self.list_bookmarks_async,      methods = ["GET"])
+        self.application.add_api_route("/bookmarks",                    self.upsert_bookmark_async,     methods = ["POST"])
+        self.application.add_api_route("/bookmarks/{bookmark_id}",      self.delete_bookmark_async,     methods = ["DELETE"])
         self.application.add_api_route("/threads/{thread_id}/messages", self.get_thread_messages_async, methods = ["GET"])
         self.application.add_api_route("/threads/{thread_id}/truncate", self.truncate_thread_async,     methods = ["POST"])   # 질문 수정 후 그 지점부터 재개
         self.application.add_api_route("/redis/{thread_id}",            self.get_redis_snapshot_async,  methods = ["GET"])   # 디버그 패널용 Redis 캐시 조회
@@ -494,6 +507,22 @@ CREATE TABLE IF NOT EXISTS chat_room
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, updated_at DESC);
+
+-- 북마크 : "방 안에서 N 번째 답변"단위로 저장한다.
+-- chat_room 에 불리언 칼럼을 두지 않는 이유 : thread_id 는 대화 전체를 가리키므로 답변 하나를 지목할 수 없다.
+-- text 는 미리보기 스냅샷 — 이게 없으면 사이드바 목록을 그릴 때마다 방마다 체크포인트를 통째로 열어야 한다.
+CREATE TABLE IF NOT EXISTS chat_bookmark
+(
+    bookmark_id  TEXT        PRIMARY KEY,
+    user_id      TEXT        NOT NULL,
+    room_id      TEXT        NOT NULL REFERENCES chat_room (room_id) ON DELETE CASCADE,
+    agent_index  INTEGER     NOT NULL,
+    text         TEXT        NOT NULL DEFAULT '',
+    completed_at TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (room_id, agent_index)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_bookmark_user_created ON chat_bookmark (user_id, created_at DESC);
 """)
 
     ##################################################
@@ -601,9 +630,53 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
                 raise HTTPException(status_code = 404, detail = f"ROOM NOT FOUND : {room_id}")
         return {"status" : "deleted"}
 
+    ##################################################
+    # 북마크 (답변 단위 · chat_bookmark 테이블)
+    ##################################################
+
+    async def list_bookmarks_async(self, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
+        # 인증된 사용자의 북마크만 최신순으로 반환한다 (스코핑 키는 요청값이 아니라 토큰의 user_id)
+        user_id = self._require_authenticated_user_id(authorization)
+        async with self.checkpoint_connection_pool.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT bookmark_id, room_id, agent_index, text, "
+                "       (EXTRACT(EPOCH FROM completed_at) * 1000)::BIGINT AS completed_at, "
+                "       (EXTRACT(EPOCH FROM created_at)   * 1000)::BIGINT AS created_at "
+                "FROM chat_bookmark WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
+            bookmark_row_list = await cursor.fetchall()
+        return {"bookmarks" : [dict(bookmark_row) for bookmark_row in bookmark_row_list]}
+
+    async def upsert_bookmark_async(self, bookmark_request : BookmarkUpsertRequest, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
+        # 북마크 추가 : 소유자는 토큰의 user_id 로 강제한다. 남의 방에는 북마크할 수 없다.
+        user_id = self._require_authenticated_user_id(authorization)
+        if bookmark_request.agent_index < 0:
+            raise HTTPException(status_code = 400, detail = "INVALID AGENT INDEX")
+        completed_at_second = (bookmark_request.completed_at / 1000) if bookmark_request.completed_at else None
+        async with self.checkpoint_connection_pool.connection() as connection:
+            # 방 소유권 확인 : 본인 소유가 아니면(또는 없는 방이면) INSERT 대상 자체가 없다
+            cursor = await connection.execute("SELECT 1 FROM chat_room WHERE room_id = %s AND user_id = %s", (bookmark_request.room_id, user_id))
+            if await cursor.fetchone() is None:
+                raise HTTPException(status_code = 403, detail = "ROOM ACCESS DENIED")
+            # 같은 답변을 다시 북마크하면 미리보기 스냅샷만 갱신한다 (중복 행을 만들지 않는다)
+            await connection.execute(
+                "INSERT INTO chat_bookmark (bookmark_id, user_id, room_id, agent_index, text, completed_at) "
+                "VALUES (%s, %s, %s, %s, %s, TO_TIMESTAMP(%s)) "
+                "ON CONFLICT (room_id, agent_index) DO UPDATE SET bookmark_id = EXCLUDED.bookmark_id, text = EXCLUDED.text, "
+                "completed_at = EXCLUDED.completed_at",
+                (bookmark_request.bookmark_id, user_id, bookmark_request.room_id, bookmark_request.agent_index,
+                 bookmark_request.text[:500], completed_at_second))
+        return {"status" : "ok"}
+
+    async def delete_bookmark_async(self, bookmark_id : str, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
+        # 본인 소유 북마크만 삭제 가능. 이미 없으면 404 대신 성공으로 처리한다 (토글 연타/낙관적 UI 재시도 대비)
+        user_id = self._require_authenticated_user_id(authorization)
+        async with self.checkpoint_connection_pool.connection() as connection:
+            await connection.execute("DELETE FROM chat_bookmark WHERE bookmark_id = %s AND user_id = %s", (bookmark_id, user_id))
+        return {"status" : "deleted"}
+
     async def get_api_client_page_async(self) -> FileResponse:
         # 새 창(/dev/api-client)으로 여는 API 테스트 페이지 : 백엔드가 직접 서빙하므로 origin = API 베이스 (CORS 불필요)
-        frontend_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "api_client.html")
+        frontend_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "public", "legacy", "api_client.html")
         if not os.path.isfile(frontend_file_path):
             raise HTTPException(status_code = 404, detail = f"API CLIENT PAGE NOT FOUND : {frontend_file_path}")
         return FileResponse(frontend_file_path, media_type = "text/html")
@@ -675,6 +748,17 @@ CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, upd
         removal_message_list = [RemoveMessage(id = message.id) for message in message_list[cut_index:] if getattr(message, "id", None) is not None]
         if removal_message_list:
             await compiled_graph.aupdate_state(runnable_configuration, {"messages" : removal_message_list})
+
+        # 잘려나간 답변들의 북마크를 정리한다. agent_index 는 위치 기반이라 절단 후 남겨두면 엉뚱한 답변을 가리키게 된다.
+        # 남길 개수는 get_thread_messages_async 의 표시 규칙과 동일하게 센다 (본문 없는 도구 호출 AI 메시지는 제외).
+        kept_agent_message_count = sum(
+            1 for message in message_list[:cut_index]
+            if type(message).__name__ in ("AIMessage", "AIMessageChunk") and _extract_message_texts(message)[0])
+        async with self.checkpoint_connection_pool.connection() as connection:
+            await connection.execute(
+                "DELETE FROM chat_bookmark WHERE agent_index >= %s AND room_id IN "
+                "(SELECT room_id FROM chat_room WHERE thread_id = %s AND user_id = %s)",
+                (kept_agent_message_count, thread_id, user_id))
         print(f"THREAD TRUNCATED : THREAD {thread_id} - KEPT {cut_index} - REMOVED {len(removal_message_list)}", flush = True)
         return {"thread_id" : thread_id, "kept_count" : cut_index, "removed_count" : len(removal_message_list)}
 

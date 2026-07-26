@@ -13,10 +13,10 @@
 })();
 </script>
 <script>
-/* 이미 로그인되어 있으면 곧장 채팅으로 보낸다. */
+/* 이미 로그인되어 있으면 곧장 채팅으로 보낸다. (React 앱 = 사이트 루트) */
 (function () {
     if (localStorage.getItem("orchestrator_chat_auth_user_id")) {
-        location.replace("chat.html");
+        location.replace("/");
     }
 })();
 </script>
@@ -74,8 +74,16 @@
 </div>
 
 <script>
-/* 통합 백엔드(server.py, 기본 :8000)에 인증 요청을 보낸다. file:// 로 열면 localhost:8000 폴백. */
-const API_BASE = location.origin.startsWith("http") ? location.origin : "http://localhost:8000";
+/* 통합 백엔드(server.py, 기본 :8000)에 인증 요청을 보낸다. API 베이스 결정 순서 :
+     ① React 앱 개발자 모드에서 저장한 API URL
+     ② 백엔드가 이 페이지를 직접 서빙 중이면 그 origin (동일 오리진 배포)
+     ③ 그 외(Vite 개발 서버 5173 · file://) 는 localhost:8000 폴백
+   ②를 그대로 쓰면 Vite 가 서빙할 때 5173 으로 요청이 나가 404 가 되므로 개발 서버 포트를 제외한다. */
+const API_URL_STORAGE_KEY = "orchestrator_chat_api_url";
+const VITE_DEV_PORT       = "5173";
+const STORED_API_URL      = localStorage.getItem(API_URL_STORAGE_KEY);
+const IS_BACKEND_ORIGIN   = location.protocol.startsWith("http") && location.port !== VITE_DEV_PORT;
+const API_BASE = (STORED_API_URL || (IS_BACKEND_ORIGIN ? location.origin : "http://localhost:8000")).replace(/\/+$/, "");
 const AUTH_USER_ID_STORAGE_KEY = "orchestrator_chat_auth_user_id";
 const AUTH_TOKEN_STORAGE_KEY   = "orchestrator_chat_auth_token";
 const USER_ID_STORAGE_KEY      = "orchestrator_chat_user_id";
@@ -126,7 +134,7 @@ function enterChat(userId, token) {
     localStorage.setItem(AUTH_USER_ID_STORAGE_KEY, userId);
     localStorage.setItem(USER_ID_STORAGE_KEY, userId);   // 방 목록 스코핑 키와 동기화
     if (token) localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);   // API 요청 Authorization 헤더에 사용
-    location.replace("chat.html");
+    location.replace("/");   // React 앱 = 사이트 루트
 }
 
 async function onSubmit(event) {
