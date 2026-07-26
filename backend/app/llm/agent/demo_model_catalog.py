@@ -1,6 +1,6 @@
 ##################################################
 # 모델 카탈로그 사용 예제
-# 실행 : python src/app/llm/agent/demo_model_catalog.py
+# 실행 : python backend/app/llm/agent/demo_model_catalog.py
 ##################################################
 
 import os

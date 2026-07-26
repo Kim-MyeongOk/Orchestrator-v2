@@ -18,7 +18,7 @@
 # 파티션 테이블에서는 ctid 가 파티션 간 유일하지 않으므로 반드시 PK 배열로 삭제한다.
 #
 # [실행 주체]
-# FastAPI lifespan 이 아니라 독립 배치 엔트리포인트(src/checkpoint_retention_batch.py)에서
+# FastAPI lifespan 이 아니라 독립 배치 엔트리포인트(backend/checkpoint_retention_batch.py)에서
 # 외부 크론잡으로 호출된다.
 ##################################################
 

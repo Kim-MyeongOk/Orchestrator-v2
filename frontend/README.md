@@ -13,7 +13,7 @@ npm run dev          # http://localhost:5173
 백엔드는 별도 터미널에서 띄운다.
 
 ```bash
-python src/server.py   # 포트 8000
+python backend/server.py   # 포트 8000
 ```
 
 백엔드가 `allow_origins=["*"]` 로 CORS 를 열어두므로 프록시 없이 바로 통신한다.

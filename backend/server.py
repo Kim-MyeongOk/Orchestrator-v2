@@ -11,7 +11,7 @@
 #   - 오케스트레이터 그래프 : Tavily 검색 + 리서치 서브에이전트 + 이미지 재주입 미들웨어
 #   - 모니터 그래프         : ThinkTrimmingMiddleware (생각 토큰 트리밍/윈도잉), (모델, 강도)별 캐시
 #
-#   실행 : python src/server.py   (기본 포트 8000)
+#   실행 : python backend/server.py   (기본 포트 8000)
 ##################################################
 
 import os
@@ -19,6 +19,7 @@ import re
 import sys
 import json
 import time
+import dataclasses
 import uuid
 import secrets
 import asyncio
@@ -81,11 +82,17 @@ from common.cache.redis_stream.redis_configuration             import RedisConfi
 from app.llm.agent.model_configuration                         import ModelConfiguration
 from app.llm.agent.model_catalog                               import ModelCatalog
 from app.llm.agent.deep_agent_factory                          import DeepAgentFactory
+from app.llm.agent.chat_model_factory                          import ChatModelFactory
 from app.llm.agent.tavily_search_tool_factory                  import TavilySearchToolFactory
 from app.llm.agent.research_subagent_factory                   import ResearchSubAgentFactory
 from app.llm.agent.binary_storage                              import LocalFileBinaryStorage
 from app.llm.agent.image_attachment_interceptor                import ImageAttachmentInterceptor
 from app.llm.agent.image_reinjection_middleware                import ImageReinjectionMiddleware
+from app.llm.compression.compression_result                    import CompressionResult
+from app.llm.compression.context_compression_configuration     import ContextCompressionConfiguration
+from app.llm.compression.context_compression_middleware        import ContextCompressionMiddleware
+from app.llm.compression.conversation_summarizer               import ConversationSummarizer
+from app.llm.compression.conversation_summary_repository       import ConversationSummaryRepository
 from app.orchestrator.api.orchestrator_api_router              import OrchestratorAPIRouter
 from app.orchestrator.repository.checkpoint_schema_initializer import CheckpointSchemaInitializer
 from app.orchestrator.service.chat_history_service             import ChatHistoryService
@@ -211,6 +218,14 @@ class RoomUpsertRequest(BaseModel):
     reasoning_effort : Optional[str]  = None
 
 
+class CompressedInfoResponse(BaseModel):
+    # 대화 압축 결과. /stream 은 NDJSON 스트림이라 본문 JSON 이 없으므로
+    # {"type" : "compressed_info", ...} 이벤트로 첫 부분에 실려 나간다.
+    is_compressed : bool
+    saved_tokens  : int           = 0
+    summary       : Optional[str] = None
+
+
 class BookmarkUpsertRequest(BaseModel):
     # 북마크 대상은 "방 안에서 몇 번째 답변인가"(agent_index) 로 식별한다.
     # thread_id 는 대화 전체를 가리키는 값이라 답변 하나를 지목할 수 없어 쓰지 않는다.
@@ -256,6 +271,10 @@ class ServerApplication:
         self.job_schema_initializer  = JobSchemaInitializer(self.postgresql_pool_manager)
         self.user_schema_initializer = UserSchemaInitializer(self.postgresql_pool_manager)
         self.user_repository         = UserRepository(self.postgresql_pool_manager)
+        # 대화 압축 : 설정은 기동 시 확정하고, 저장소/생성기는 체크포인트 풀이 열린 뒤 주입한다
+        self.compression_configuration       = ServerApplication._get_context_compression_configuration()
+        self.conversation_summary_repository = None
+        self.conversation_summarizer         = None
         # 인증 토큰 : AUTH_TOKEN_SECRET 미설정 시 프로세스 임시 비밀키(재시작 시 기존 토큰 무효화)
         self.auth_token_secret           = os.getenv("AUTH_TOKEN_SECRET") or secrets.token_hex(32)
         self.auth_token_ttl_second_count = int(os.getenv("AUTH_TOKEN_TTL_SECOND_COUNT", "604800"))   # 기본 7일
@@ -375,6 +394,18 @@ class ServerApplication:
         self.application.add_api_route("/dev/api-client",               self.get_api_client_page_async, methods = ["GET"], include_in_schema = False)   # APIDog 스타일 API 테스트 페이지
 
     @staticmethod
+    def _get_context_compression_configuration() -> ContextCompressionConfiguration:
+        # 대화 압축 임계치 : .env 로 조정 가능. CONTEXT_COMPRESSION_ENABLED=false 로 완전히 끌 수 있다.
+        return ContextCompressionConfiguration(
+            recent_message_keep_count   = int(os.getenv("CONTEXT_COMPRESSION_RECENT_KEEP_COUNT",   "10")),
+            trigger_message_count       = int(os.getenv("CONTEXT_COMPRESSION_TRIGGER_MESSAGE_COUNT", "14")),
+            trigger_token_count         = int(os.getenv("CONTEXT_COMPRESSION_TRIGGER_TOKEN_COUNT", "3000")),
+            summary_line_count          = int(os.getenv("CONTEXT_COMPRESSION_SUMMARY_LINE_COUNT",  "4")),
+            summary_maximum_token_count = int(os.getenv("CONTEXT_COMPRESSION_SUMMARY_MAXIMUM_TOKEN_COUNT", "512")),
+            is_enabled                  = os.getenv("CONTEXT_COMPRESSION_ENABLED", "true").strip().lower() != "false"
+        )
+
+    @staticmethod
     def _get_postgresql_configuration() -> PostgresqlConfiguration:
         return PostgresqlConfiguration(
             host                     =     os.getenv("POSTGRESQL_HOST"                    , "localhost"),
@@ -451,19 +482,28 @@ class ServerApplication:
         return _create_legacy_model_configuration(model_name, reasoning_effort)
 
     @staticmethod
-    def _create_monitor_compiled_graph(checkpoint_saver, model_configuration : ModelConfiguration):
-        # 진단/채팅용 그래프 : 운영과 동일한 deepagents 그래프에 생각 토큰 트리밍 미들웨어만 얹는다
+    def _create_monitor_compiled_graph(checkpoint_saver, model_configuration : ModelConfiguration, context_compression_middleware = None):
+        # 진단/채팅용 그래프 : 운영과 동일한 deepagents 그래프에 생각 토큰 트리밍 미들웨어를 얹는다.
+        # 압축 미들웨어는 트리밍 뒤에 온다 — 생각 토큰이 걷힌 뒤의 메시지를 대상으로 창을 잡아야
+        # 요약과 최근 원본이 같은 기준으로 정렬된다.
+        middleware_list = [ThinkTrimmingMiddleware()]
+        if context_compression_middleware is not None:
+            middleware_list.append(context_compression_middleware)
         return DeepAgentFactory.create(
             model_configuration,
             checkpointer    = checkpoint_saver,
-            middleware_list = [ThinkTrimmingMiddleware()]
+            middleware_list = middleware_list
         )
 
     def _get_or_create_compiled_graph(self, model_name : Optional[str], reasoning_effort : Optional[str] = None):
         # (모델, 생각 강도)별 그래프를 지연 생성해 캐싱한다 (같은 체크포인터를 공유하므로 스레드 이력은 설정과 무관하게 이어진다)
         cache_key = (model_name or self._get_default_model_key(), reasoning_effort)
         if cache_key not in self.compiled_graph_dictionary:
-            self.compiled_graph_dictionary[cache_key] = ServerApplication._create_monitor_compiled_graph(self.checkpoint_saver, self._resolve_model_configuration(cache_key[0], cache_key[1]))
+            context_compression_middleware = None
+            if self.conversation_summary_repository is not None:
+                context_compression_middleware = ContextCompressionMiddleware(self.conversation_summary_repository, self.compression_configuration)
+            self.compiled_graph_dictionary[cache_key] = ServerApplication._create_monitor_compiled_graph(
+                self.checkpoint_saver, self._resolve_model_configuration(cache_key[0], cache_key[1]), context_compression_middleware)
         return self.compiled_graph_dictionary[cache_key]
 
     async def _initialize_checkpointer_async(self) -> None:
@@ -483,6 +523,10 @@ class ServerApplication:
         checkpoint_saver = AsyncPostgresSaver(self.checkpoint_connection_pool)
         await checkpoint_saver.setup()
         self.checkpoint_saver = checkpoint_saver
+
+        # 대화 압축 : 요약 저장소와 생성기는 체크포인트 풀(chat_room 이 사는 DB)을 공유한다
+        self.conversation_summary_repository = ConversationSummaryRepository(self.checkpoint_connection_pool)
+        self.conversation_summarizer         = ConversationSummarizer(self.conversation_summary_repository, self.compression_configuration)
 
         # 오케스트레이터 그래프 : 기존 동작 보존 — CHECKPOINT_ENABLED 일 때만 체크포인터가 주입된 그래프로 교체
         if self.is_checkpoint_enabled:
@@ -507,6 +551,13 @@ CREATE TABLE IF NOT EXISTS chat_room
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, updated_at DESC);
+
+-- 대화 압축 상태 : 방을 나갔다 들어와도 요약이 유지되도록 chat_room 에 함께 둔다.
+-- (기존 배포에도 붙어야 하므로 CREATE 가 아니라 ADD COLUMN IF NOT EXISTS 로 추가한다)
+-- summarized_message_count : 어디까지 요약에 반영했는지 — 없으면 압축할 때마다 옛 대화를 다시 요약한다.
+ALTER TABLE chat_room ADD COLUMN IF NOT EXISTS summary                  TEXT;
+ALTER TABLE chat_room ADD COLUMN IF NOT EXISTS summarized_message_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE chat_room ADD COLUMN IF NOT EXISTS summary_updated_at       TIMESTAMPTZ;
 
 -- 북마크 : "방 안에서 N 번째 답변"단위로 저장한다.
 -- chat_room 에 불리언 칼럼을 두지 않는 이유 : thread_id 는 대화 전체를 가리키므로 답변 하나를 지목할 수 없다.
@@ -759,6 +810,11 @@ CREATE INDEX IF NOT EXISTS idx_chat_bookmark_user_created ON chat_bookmark (user
                 "DELETE FROM chat_bookmark WHERE agent_index >= %s AND room_id IN "
                 "(SELECT room_id FROM chat_room WHERE thread_id = %s AND user_id = %s)",
                 (kept_agent_message_count, thread_id, user_id))
+
+        # 요약도 초기화한다 — 잘려나간 대화를 요약이 계속 가리키면 모델이 삭제된 내용을 기억한 것처럼 답한다.
+        # (다음 턴에 남은 히스토리로 다시 요약이 만들어진다)
+        if self.conversation_summary_repository is not None:
+            await self.conversation_summary_repository.clear_summary_async(thread_id)
         print(f"THREAD TRUNCATED : THREAD {thread_id} - KEPT {cut_index} - REMOVED {len(removal_message_list)}", flush = True)
         return {"thread_id" : thread_id, "kept_count" : cut_index, "removed_count" : len(removal_message_list)}
 
@@ -823,6 +879,30 @@ CREATE INDEX IF NOT EXISTS idx_chat_bookmark_user_created ON chat_bookmark (user
             self.is_run_buffer_disabled = True
             print(f"RUN BUFFER DISABLED : REDIS UNAVAILABLE - {exception}", flush = True)
 
+    async def _compress_context_if_needed_async(self, thread_id : str, model_name : Optional[str], reasoning_effort : Optional[str]) -> CompressionResult:
+        # 체크포인트의 전체 히스토리를 재료로 요약을 갱신한다. 압축 실패가 대화를 막으면 안 되므로
+        # 어떤 예외든 "압축 안 함"으로 떨어뜨리고 본 스트리밍은 그대로 진행시킨다.
+        if self.conversation_summarizer is None or not self.compression_configuration.is_enabled:
+            return CompressionResult.create_uncompressed()
+        try:
+            state_snapshot = await self._get_or_create_compiled_graph(model_name, reasoning_effort).aget_state({"configurable" : {"thread_id" : thread_id}})
+            message_list   = state_snapshot.values.get("messages", []) if state_snapshot else []
+            if not message_list:
+                return CompressionResult.create_uncompressed()
+            # 요약 전용 모델 : 본 대화와 같은 설정을 쓰되 생각(reasoning)을 끄고 생성 상한을 낮춘다.
+            # ModelConfiguration 은 frozen dataclass 라 속성 대입이 아니라 replace 로 사본을 만든다.
+            summary_model_configuration = dataclasses.replace(
+                self._resolve_model_configuration(model_name, None),
+                reasoning_enabled   = False,
+                reasoning_effort    = None,
+                maximum_token_count = self.compression_configuration.summary_maximum_token_count
+            )
+            summary_chat_model = ChatModelFactory.create(summary_model_configuration)
+            return await self.conversation_summarizer.compress_if_needed_async(thread_id, message_list, summary_chat_model)
+        except Exception as exception:
+            print(f"CONTEXT COMPRESSION SKIPPED : THREAD {thread_id} - {exception}", flush = True)
+            return CompressionResult.create_uncompressed()
+
     async def stream_async(self, stream_request : StreamRequest, authorization : Optional[str] = Header(None)) -> StreamingResponse:
         # 인증 + 스레드 소유권 검증 : 남의 스레드로 스트리밍(대화 이어쓰기) 방지
         user_id = self._require_authenticated_user_id(authorization)
@@ -834,6 +914,10 @@ CREATE INDEX IF NOT EXISTS idx_chat_bookmark_user_created ON chat_bookmark (user
         runnable_configuration = {"configurable" : {"thread_id" : stream_request.thread_id, "run_id" : run_id}}
         input_dictionary       = {"messages" : [HumanMessage(content = stream_request.message)]}
         compiled_graph         = self._get_or_create_compiled_graph(stream_request.model, stream_request.reasoning_effort)
+
+        # 대화 압축 : astream 이전에 요약을 만들어 chat_room 에 저장해 둔다.
+        # 그래야 그래프 안의 ContextCompressionMiddleware 가 방금 갱신된 요약을 읽어 프롬프트를 재구성한다.
+        compression_result = await self._compress_context_if_needed_async(stream_request.thread_id, stream_request.model, stream_request.reasoning_effort)
 
         def extract_chunk_texts(message_chunk):
             # 프로바이더별 청크 형식 통합 : ollama 는 additional_kwargs.reasoning_content,
@@ -860,6 +944,10 @@ CREATE INDEX IF NOT EXISTS idx_chat_bookmark_user_created ON chat_bookmark (user
             # 첫 이벤트로 run_id 를 알린다 (클라이언트가 이번 턴을 식별/추적할 수 있게)
             if stream_request.include_reasoning:
                 yield json.dumps({"type" : "start", "run_id" : run_id, "thread_id" : stream_request.thread_id}, ensure_ascii = False) + "\n"
+                # 압축이 일어난 턴에만 compressed_info 를 알린다 (평문 스트림 모드에서는 본문을 오염시키므로 생략)
+                if compression_result.is_compressed:
+                    compressed_info_dictionary = CompressedInfoResponse(**compression_result.to_response_dictionary()).model_dump()
+                    yield json.dumps({"type" : "compressed_info", "compressed_info" : compressed_info_dictionary}, ensure_ascii = False) + "\n"
             try:
                 async for message_chunk, _metadata in compiled_graph.astream(input_dictionary, runnable_configuration, stream_mode = "messages"):
                     # 생각 과정(reasoning) : 사용자가 대기 시간 동안 진행 상황을 볼 수 있게 실시간 전송한다 (NDJSON 모드 한정)
