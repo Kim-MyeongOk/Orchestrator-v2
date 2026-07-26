@@ -12,6 +12,7 @@ import ToastContainer    from "./components/ToastContainer";
 import { useBookmarks }  from "./hooks/useBookmarks";
 import { useChatStream } from "./hooks/useChatStream";
 import { useRooms }      from "./hooks/useRooms";
+import { useSTT }        from "./hooks/useSTT";
 import { useTheme }      from "./hooks/useTheme";
 import { useToast }      from "./hooks/useToast";
 import { useTTS }        from "./hooks/useTTS";
@@ -52,6 +53,8 @@ export default function App() {
     const bookmarks = useBookmarks({ showToast });
     // speechSynthesis 는 창 전체에 하나뿐이라 훅도 여기서 한 번만 만든다 (말풍선마다 두면 재생 상태가 어긋난다)
     const tts       = useTTS();
+    // 마이크도 하나뿐이라 같은 이유로 여기서 만든다. 인식 결과는 입력창 값으로 곧장 흘려보낸다.
+    const stt       = useSTT({ onTranscriptChange : setInputValue, onError : showToast });
 
     const stream = useChatStream({
         appendMessage          : rooms.appendMessage,
@@ -139,12 +142,13 @@ export default function App() {
         if (!messageText || isStreaming || !activeRoom) return;
         const sentReferencedText = referencedText;
         const sentPresetName = presetName;
+        stt.stopRecording();   // 받아쓰기가 켜진 채로 두면 방금 비운 입력창에 보낸 문장이 되살아난다
         setInputValue("");
         setReferencedText("");   // 참조는 한 턴만 따아간다 (다음 질문에 의도치 않게 달라붙지 않도록)
         // 프리셋은 유지한다 (사용자가 명시적으로 변경할 때까지)
         const finalStatus = await stream.sendMessageAsync(activeRoom, messageText, sentReferencedText, sentPresetName);
         setStatusInfo(finalStatus);
-    }, [activeRoom, inputValue, isStreaming, referencedText, presetName, stream]);
+    }, [activeRoom, inputValue, isStreaming, referencedText, presetName, stream, stt]);
 
     const onRetryError = useCallback(async (errorMessage) => {
         if (isStreaming || !activeRoom) return;
@@ -160,6 +164,14 @@ export default function App() {
         if (isStreaming) { showToast("⚠ 응답 중에는 참조를 담을 수 없습니다."); return; }
         setReferencedText(selectedText);
     }, [isStreaming, showToast]);
+
+    /* ── 음성 받아쓰기 : 인식 결과를 입력창에 이어 붙인다 ── */
+
+    const onToggleRecording = useCallback(() => {
+        // 답변을 읽어주는 중이면 먼저 끊는다 — 스피커로 나가는 소리를 마이크가 그대로 받아 적는다
+        if (!stt.isRecording) tts.stopSpeaking();
+        stt.toggleRecording(inputValue);   // 이미 적어둔 글 뒤에 이어 붙이도록 현재 입력값을 넘긴다
+    }, [inputValue, stt, tts]);
 
     /* ── 질문 수정 : 체크포인트를 절단하고 그 지점부터 다시 이어간다 ── */
 
@@ -197,19 +209,29 @@ export default function App() {
 
     /* ── 방 조작 ── */
 
+    // 새 방 만들기·방 삭제도 결국 보고 있는 방이 바뀐다.
+    // 이 둘은 onSwitchRoom 을 거치지 않으므로 받아쓰기 정지를 여기서 따로 걸어준다
+    // (안 걸면 마이크가 켜진 채로 새 방에 넘어가 그 방 입력창에 계속 받아 적힌다).
+    const onCreateRoom = useCallback(() => {
+        stt.stopRecording();
+        rooms.createRoom();
+    }, [rooms, stt]);
+
     const onSwitchRoom = useCallback((roomId) => {
         if (isStreaming) { showToast("⚠ 응답 중에는 다른 대화로 이동할 수 없습니다."); return; }
         tts.stopSpeaking();   // 떠난 방의 답변을 계속 읽으면 정지 버튼이 화면에 없어 멈출 방법이 없다
+        stt.stopRecording();  // 받아쓰기도 끊는다 — 다른 방 입력창에 이어서 받아 적히면 안 된다
         setReferencedText("");   // 참조는 떠나온 방의 답변에서 딴 것이라 여기로 들고 오지 않는다
         setScrollTargetAgentIndex(null);
         rooms.switchRoom(roomId);
-    }, [isStreaming, rooms, showToast, tts]);
+    }, [isStreaming, rooms, showToast, stt, tts]);
 
     const onDeleteRoom = useCallback((roomId) => {
         if (isStreaming) return;
+        stt.stopRecording();   // 보고 있던 방을 지우면 다른 방으로 넘어간다 — 마이크를 들고 가지 않는다
         bookmarks.removeRoomBookmarks(roomId);   // 삭제된 방의 북마크도 함께 정리
         rooms.deleteRoom(roomId);
-    }, [bookmarks, isStreaming, rooms]);
+    }, [bookmarks, isStreaming, rooms, stt]);
 
     const onConfirmReset = useCallback(() => {
         setIsResetModalOpen(false);
@@ -247,7 +269,7 @@ export default function App() {
                 onOpenBookmark={onOpenBookmark}
                 onRemoveBookmark={(bookmark) => bookmarks.toggleBookmark(bookmark.roomId, bookmark.agentIndex, bookmark.text, bookmark.completedAt)}
                 onUpdateBookmarkMemo={bookmarks.updateBookmarkMemo}
-                onCreateRoom={rooms.createRoom}
+                onCreateRoom={onCreateRoom}
                 onSwitchRoom={onSwitchRoom}
                 onRenameRoom={rooms.renameRoom}
                 onDeleteRoom={onDeleteRoom}
@@ -289,7 +311,8 @@ export default function App() {
                 <ChatInput inputValue={inputValue} onInputValueChange={setInputValue}
                            onSend={onSend} onStop={stream.stopStreaming} isStreaming={isStreaming}
                            referencedText={referencedText} onClearReference={() => setReferencedText("")}
-                           presetName={presetName} onPresetNameChange={setPresetName} availablePresetNames={availablePresetNames} />
+                           presetName={presetName} onPresetNameChange={setPresetName} availablePresetNames={availablePresetNames}
+                           isRecognitionSupported={stt.isRecognitionSupported} isRecording={stt.isRecording} onToggleRecording={onToggleRecording} />
             </main>
 
             <ToastContainer toastList={toastList} onDismiss={dismissToast} />
