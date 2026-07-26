@@ -5,11 +5,18 @@ import { SendIcon } from "./icons";
 import { StopIcon } from "./icons";
 
 const TEXTAREA_MAXIMUM_HEIGHT_PIXEL = 160;
+const REFERENCE_PREVIEW_LENGTH      = 60;   // 태그 바에 보여줄 발췌 미리보기 길이
 
-/* 하단 입력 바 : Enter 전송 / Shift+Enter 줄바꿈 · 자동 높이 · 스트리밍 중에는 중단 버튼으로 전환 */
+/* 하단 입력 바 : Enter 전송 / Shift+Enter 줄바꿈 · 자동 높이 · 스트리밍 중에는 중단 버튼으로 전환.
+   답변에서 「참조하기」로 담은 발췌가 있으면 입력창 위에 태그 바로 표시한다. */
 
-export default function ChatInput({ inputValue, onInputValueChange, onSend, onStop, isStreaming }) {
+export default function ChatInput({ inputValue, onInputValueChange, onSend, onStop, isStreaming, referencedText, onClearReference }) {
     const textareaRef = useRef(null);
+
+    // 참조를 담으면 바로 이어서 질문을 쓸 수 있게 입력창으로 포커스를 옮긴다
+    useEffect(() => {
+        if (referencedText) textareaRef.current?.focus();
+    }, [referencedText]);
 
     // 자동 높이 : 값이 바뀔 때마다 scrollHeight 로 재계산한다 (전송 후 초기화도 여기서 처리된다)
     useEffect(() => {
@@ -28,11 +35,36 @@ export default function ChatInput({ inputValue, onInputValueChange, onSend, onSt
         if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             onSend();
+            return;
+        }
+        // 입력이 비어 있을 때의 Backspace 로도 참조를 뗄 수 있게 한다 (❌ 를 겨냥하지 않아도 되도록)
+        if (event.key === "Backspace" && inputValue === "" && referencedText) {
+            event.preventDefault();
+            onClearReference();
         }
     };
 
+    const referencePreviewText = (referencedText || "").replace(/\s+/g, " ").trim();
+    const isPreviewTruncated   = referencePreviewText.length > REFERENCE_PREVIEW_LENGTH;
+
     return (
         <footer className="shrink-0 border-t border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60 backdrop-blur p-3 md:p-4">
+            {/* 참조 태그 바 : [참조: "선택 텍스트…"] ❌ */}
+            {referencedText ? (
+                <div className="max-w-3xl mx-auto mb-2 flex">
+                    <div className="flex items-center gap-1.5 max-w-full min-w-0 pl-2.5 pr-1.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300">
+                        <span className="shrink-0 text-[11px] font-semibold">참조</span>
+                        <span className="min-w-0 truncate text-[11px]" title={referencedText}>
+                            “{referencePreviewText.slice(0, REFERENCE_PREVIEW_LENGTH)}{isPreviewTruncated ? "…" : ""}”
+                        </span>
+                        <button type="button" onClick={onClearReference} title="참조 해제" aria-label="참조 해제"
+                                className="shrink-0 w-4 h-4 rounded flex items-center justify-center text-indigo-400 dark:text-indigo-500 hover:text-red-500 dark:hover:text-red-400 transition text-[10px]">
+                            ✕
+                        </button>
+                    </div>
+                </div>
+            ) : null}
+
             <div className="max-w-3xl mx-auto flex items-end gap-2.5">
                 <textarea ref={textareaRef} rows={1} value={inputValue}
                           onChange={(event) => onInputValueChange(event.target.value)}

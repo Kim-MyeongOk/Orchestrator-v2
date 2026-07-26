@@ -5,7 +5,7 @@ import { useState }  from "react";
 /* 사용자 질문 말풍선.
    마우스를 올리면 수정 버튼이 나타나고, 수정하면 이 질문 이후의 대화를 지우고 여기서부터 다시 이어간다. */
 
-export default function UserMessage({ text, userMessageIndex, isStreaming, onSubmitEdit, onBlockedEdit }) {
+export default function UserMessage({ text, referencedText, userMessageIndex, isStreaming, onSubmitEdit, onBlockedEdit }) {
     const [isEditing, setIsEditing]   = useState(false);
     const [draftText, setDraftText]   = useState(text);
     const textareaRef                 = useRef(null);
@@ -61,8 +61,14 @@ export default function UserMessage({ text, userMessageIndex, isStreaming, onSub
                     className="shrink-0 w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 dark:text-slate-500 hover:text-indigo-500 dark:hover:text-indigo-400 hover:bg-slate-200 dark:hover:bg-slate-800 opacity-0 group-hover:opacity-100 transition text-xs">
                 ✎
             </button>
-            <div className="max-w-[78%] md:max-w-[65%] bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow">
-                {text}
+            <div className="max-w-[78%] md:max-w-[65%] bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed shadow">
+                {/* 참조 발췌 : 질문과 함께 모델에 전달된 내용을 인용 블록으로 되짚어 준다 */}
+                {referencedText ? (
+                    <p className="mb-1.5 pl-2 border-l-2 border-indigo-400 dark:border-indigo-500 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300 whitespace-pre-wrap break-words line-clamp-4">
+                        ❝ {referencedText}
+                    </p>
+                ) : null}
+                <span className="whitespace-pre-wrap">{text}</span>
             </div>
         </div>
     );

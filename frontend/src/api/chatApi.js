@@ -173,7 +173,7 @@ export async function listModelsAsync() {
 
 /* ══════════════════ 스트리밍 (NDJSON) ══════════════════ */
 
-export async function streamChatTurnAsync({ threadId, message, model, reasoningEffort, signal, onStart, onReasoning, onToken, onStreamError }) {
+export async function streamChatTurnAsync({ threadId, message, model, reasoningEffort, referencedText, signal, onStart, onReasoning, onToken, onStreamError }) {
     // NDJSON 이벤트 스트림을 읽어 콜백으로 흘려보낸다.
     //   {"type":"start","run_id":...}     → onStart
     //   {"type":"reasoning","text":...}   → onReasoning (생각 과정)
@@ -187,7 +187,8 @@ export async function streamChatTurnAsync({ threadId, message, model, reasoningE
             message           : message,
             model             : model || null,
             reasoning_effort  : reasoningEffort || null,
-            include_reasoning : true
+            include_reasoning : true,
+            referenced_text   : referencedText || null   // 서버가 [참조 내용]/[질문] 형태로 조합한다
         }),
         signal : signal
     });

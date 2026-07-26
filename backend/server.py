@@ -249,6 +249,8 @@ class StreamRequest(BaseModel):
     reasoning_effort  : Optional[str] = None    # 생각 강도 : low | medium | high | None(모델 기본)
     include_reasoning : bool          = False   # True : NDJSON 이벤트 스트림({"type":"reasoning"|"token","text":...}) 으로 생각 과정을 함께 전송
                                                 # False : 답변 토큰만 평문 스트림 (기존 클라이언트 하위호환)
+    referenced_text   : Optional[str] = None    # 이전 답변에서 드래그해 "참조하기"로 담은 발췌.
+                                                # 있으면 [참조 내용]/[질문] 두 블록으로 조합해 모델에 전달한다.
 
 
 class TruncateThreadRequest(BaseModel):
@@ -261,7 +263,8 @@ class TruncateThreadRequest(BaseModel):
 
 
 class ServerApplication:
-    BOOKMARK_MEMO_MAXIMUM_LENGTH = 1000   # 북마크 메모 최대 길이 (기본값 : 1000)
+    BOOKMARK_MEMO_MAXIMUM_LENGTH   = 1000   # 북마크 메모 최대 길이 (기본값 : 1000)
+    REFERENCED_TEXT_MAXIMUM_LENGTH = 2000   # 참조 발췌 최대 길이 (기본값 : 2000) — 프롬프트가 발췌로 뒤덮이는 것을 막는다
 
     def __init__(self) -> None:
         load_dotenv()
@@ -941,6 +944,18 @@ ALTER TABLE chat_bookmark ADD COLUMN IF NOT EXISTS memo TEXT;
             print(f"CONTEXT COMPRESSION SKIPPED : THREAD {thread_id} - {exception}", flush = True)
             return CompressionResult.create_uncompressed()
 
+    @staticmethod
+    def _build_referenced_message_text(message : str, referenced_text : Optional[str]) -> str:
+        # 참조 발췌가 있으면 [참조 내용] / [질문] 두 블록으로 조합한다.
+        # 조합 결과를 그대로 HumanMessage 로 저장하는 이유 : 다음 턴에도 체크포인트에서 참조 맥락이 함께 복원되어야
+        # "아까 그거"처럼 발췌를 가리키는 후속 질문이 이어진다.
+        if referenced_text is None:
+            return message
+        trimmed_reference = referenced_text.strip()
+        if not trimmed_reference:
+            return message
+        return f"[참조 내용]: {trimmed_reference[:ServerApplication.REFERENCED_TEXT_MAXIMUM_LENGTH]}\n[질문]: {message}"
+
     async def stream_async(self, stream_request : StreamRequest, authorization : Optional[str] = Header(None)) -> StreamingResponse:
         # 인증 + 스레드 소유권 검증 : 남의 스레드로 스트리밍(대화 이어쓰기) 방지
         user_id = self._require_authenticated_user_id(authorization)
@@ -950,7 +965,8 @@ ALTER TABLE chat_bookmark ADD COLUMN IF NOT EXISTS memo TEXT;
         # 청크를 orch:{thread_id}:run:{run_id}:chunk_list 버퍼에 누적해 디버그 패널에서 추적할 수 있게 한다.
         run_id                 = str(uuid.uuid4())
         runnable_configuration = {"configurable" : {"thread_id" : stream_request.thread_id, "run_id" : run_id}}
-        input_dictionary       = {"messages" : [HumanMessage(content = stream_request.message)]}
+        composed_message_text  = ServerApplication._build_referenced_message_text(stream_request.message, stream_request.referenced_text)
+        input_dictionary       = {"messages" : [HumanMessage(content = composed_message_text)]}
         compiled_graph         = self._get_or_create_compiled_graph(stream_request.model, stream_request.reasoning_effort)
 
         # 대화 압축 : astream 이전에 요약을 만들어 chat_room 에 저장해 둔다.

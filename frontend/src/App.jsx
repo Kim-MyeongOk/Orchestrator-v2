@@ -33,6 +33,7 @@ export default function App() {
     const { toastList, showToast, dismissToast }  = useToast();
 
     const [inputValue, setInputValue]                     = useState("");
+    const [referencedText, setReferencedText]             = useState("");   // 답변에서 「참조하기」로 담은 발췌 (전송 후 비운다)
     const [sidebarTabName, setSidebarTabName]             = useState("rooms");
     const [isResetModalOpen, setIsResetModalOpen]         = useState(false);
     const [scrollTargetAgentIndex, setScrollTargetAgentIndex] = useState(null);
@@ -111,17 +112,27 @@ export default function App() {
     const onSend = useCallback(async () => {
         const messageText = inputValue.trim();
         if (!messageText || isStreaming || !activeRoom) return;
+        const sentReferencedText = referencedText;
         setInputValue("");
-        const finalStatus = await stream.sendMessageAsync(activeRoom, messageText);
+        setReferencedText("");   // 참조는 한 턴만 따라간다 (다음 질문에 의도치 않게 달라붙지 않도록)
+        const finalStatus = await stream.sendMessageAsync(activeRoom, messageText, sentReferencedText);
         setStatusInfo(finalStatus);
-    }, [activeRoom, inputValue, isStreaming, stream]);
+    }, [activeRoom, inputValue, isStreaming, referencedText, stream]);
 
     const onRetryError = useCallback(async (errorMessage) => {
         if (isStreaming || !activeRoom) return;
         rooms.removeErrorMessage(activeRoom.roomId, errorMessage.text);
-        const finalStatus = await stream.executeStreamTurnAsync(activeRoom, errorMessage.retryMessageText);
+        // 실패한 턴에 붙어 있던 참조를 그대로 다시 실어 보낸다
+        const finalStatus = await stream.executeStreamTurnAsync(activeRoom, errorMessage.retryMessageText, errorMessage.retryReferencedText || "");
         setStatusInfo(finalStatus);
     }, [activeRoom, isStreaming, rooms, stream]);
+
+    /* ── 참조하기 : 답변에서 드래그한 구간을 다음 질문의 문맥으로 담아 둔다 ── */
+
+    const onQuoteText = useCallback((selectedText) => {
+        if (isStreaming) { showToast("⚠ 응답 중에는 참조를 담을 수 없습니다."); return; }
+        setReferencedText(selectedText);
+    }, [isStreaming, showToast]);
 
     /* ── 질문 수정 : 체크포인트를 절단하고 그 지점부터 다시 이어간다 ── */
 
@@ -162,6 +173,7 @@ export default function App() {
     const onSwitchRoom = useCallback((roomId) => {
         if (isStreaming) { showToast("⚠ 응답 중에는 다른 대화로 이동할 수 없습니다."); return; }
         tts.stopSpeaking();   // 떠난 방의 답변을 계속 읽으면 정지 버튼이 화면에 없어 멈출 방법이 없다
+        setReferencedText("");   // 참조는 떠나온 방의 답변에서 딴 것이라 여기로 들고 오지 않는다
         setScrollTargetAgentIndex(null);
         rooms.switchRoom(roomId);
     }, [isStreaming, rooms, showToast, tts]);
@@ -244,10 +256,12 @@ export default function App() {
                     isSpeechSupported={tts.isSpeechSupported}
                     speakingKey={tts.speakingKey}
                     onToggleSpeak={tts.toggleSpeak}
+                    onQuoteText={onQuoteText}
                 />
 
                 <ChatInput inputValue={inputValue} onInputValueChange={setInputValue}
-                           onSend={onSend} onStop={stream.stopStreaming} isStreaming={isStreaming} />
+                           onSend={onSend} onStop={stream.stopStreaming} isStreaming={isStreaming}
+                           referencedText={referencedText} onClearReference={() => setReferencedText("")} />
             </main>
 
             <ToastContainer toastList={toastList} onDismiss={dismissToast} />
