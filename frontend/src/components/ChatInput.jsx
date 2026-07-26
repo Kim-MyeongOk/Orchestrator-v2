@@ -10,7 +10,7 @@ const REFERENCE_PREVIEW_LENGTH      = 60;   // 태그 바에 보여줄 발췌 �
 /* 하단 입력 바 : Enter 전송 / Shift+Enter 줄바꿈 · 자동 높이 · 스트리밍 중에는 중단 버튼으로 전환.
    답변에서 「참조하기」로 담은 발췌가 있으면 입력창 위에 태그 바로 표시한다. */
 
-export default function ChatInput({ inputValue, onInputValueChange, onSend, onStop, isStreaming, referencedText, onClearReference }) {
+export default function ChatInput({ inputValue, onInputValueChange, onSend, onStop, isStreaming, referencedText, onClearReference, presetName, onPresetNameChange, availablePresetNames }) {
     const textareaRef = useRef(null);
 
     // 참조를 담으면 바로 이어서 질문을 쓸 수 있게 입력창으로 포커스를 옮긴다
@@ -71,6 +71,16 @@ export default function ChatInput({ inputValue, onInputValueChange, onSend, onSt
                           onKeyDown={onKeyDown}
                           placeholder="메시지 입력…  (Enter 전송 · Shift+Enter 줄바꿈)"
                           className="flex-1 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-3 text-sm resize-none max-h-40 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition placeholder:text-slate-400 dark:placeholder:text-slate-600" />
+                {/* LLM 파라미터 프리셋 선택 드롭다운 */}
+                {availablePresetNames && availablePresetNames.length > 0 ? (
+                    <select value={presetName || "MEDIUM"} onChange={(event) => onPresetNameChange(event.target.value)}
+                            title="LLM 파라미터 프리셋 선택 (LOW: 저온도, MEDIUM: 표준, HIGH: 높은 창의성)"
+                            className="shrink-0 px-3 py-2.5 rounded-xl bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition hover:bg-slate-50 dark:hover:bg-slate-900">
+                        {availablePresetNames.map(name => (
+                            <option key={name} value={name}>{name}</option>
+                        ))}
+                    </select>
+                ) : null}
                 <button onClick={isStreaming ? onStop : onSend}
                         title={isStreaming ? "응답 중단" : "전송"}
                         aria-label={isStreaming ? "응답 중단" : "전송"}
