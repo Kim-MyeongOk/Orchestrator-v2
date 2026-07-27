@@ -14,6 +14,7 @@
 #   실행 : python backend/server.py   (기본 포트 8000)
 ##################################################
 
+import io
 import os
 import re
 import sys
@@ -31,8 +32,10 @@ if sys.platform == "win32":
 
 from dotenv                  import load_dotenv
 from fastapi                 import FastAPI
+from fastapi                 import File
 from fastapi                 import HTTPException
 from fastapi                 import Header
+from fastapi                 import UploadFile
 from fastapi.responses       import StreamingResponse
 from fastapi.responses       import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,6 +53,12 @@ from langchain_core.messages           import BaseMessage
 from langchain_core.messages           import HumanMessage
 from langchain_core.messages           import RemoveMessage
 from langchain.agents.middleware.types import AgentMiddleware
+
+# .env 는 프로젝트 모듈을 불러오기 전에 읽어야 한다.
+# common/storage/s3_helper.py 의 s3_helper 싱글톤은 임포트되는 순간 os.getenv 로 접속 정보를 확정하는데,
+# 그때 .env 가 아직 안 읽혀 있으면 버킷·키가 전부 None 인 클라이언트가 만들어져 업로드가 통째로 실패한다.
+# (ServerApplication.__init__ 의 load_dotenv 는 이미 늦다)
+load_dotenv()
 
 from common.database.postgresql.postgresql_pool_manager        import PostgresqlPoolManager
 from common.cache.redis_stream.redis_stream_client             import RedisStreamClient
@@ -84,6 +93,8 @@ from app.llm.api.model_preset_response                         import ModelPrese
 from app.llm.api.model_preset_response                         import ModelPresetsResponse
 from app.llm.api.model_preset_response                         import ParameterSet
 from app.llm.chat.chat_query_service                           import ChatQueryService
+from app.llm.image.image_upload_service                        import ImageUploadService
+from app.llm.image.vision_message_builder                      import VisionMessageBuilder
 from common.database.postgresql.postgresql_configuration       import PostgresqlConfiguration
 from common.cache.redis_stream.redis_configuration             import RedisConfiguration
 from app.llm.agent.model_configuration                         import ModelConfiguration
@@ -263,6 +274,9 @@ class StreamRequest(BaseModel):
     referenced_message_id_list : List[str] = Field(default_factory = list)
                                                 # 우클릭으로 통째로 고른 이전 답변들의 ID ("agent-0", "agent-3" …).
                                                 # 체크포인트에서 본문을 찾아 <referenced_context> 블록으로 묶어 전달한다.
+    image_url_list : List[str] = Field(default_factory = list)
+                                                # POST /api/upload 로 MinIO 에 올린 이미지들의 접근 URL.
+                                                # 있으면 질문을 OpenAI 멀티모달 규격(text + image_url 블록)으로 조립해 Vision 모델에 넘긴다.
 
 
 class TruncateThreadRequest(BaseModel):
@@ -391,6 +405,12 @@ class ServerApplication:
 
         # 이미지 격리 파이프라인 : 라우터에서 격리(detach) → 체크포인트에는 참조만 → 모델 직전 재주입(reinject)
         # 이미지 입력이 없는 현재는 전 구간 무비용 패스스루로 동작한다
+        # 이미지 업로드(MinIO) + Vision 메시지 조립
+        self.image_upload_service         = ImageUploadService.create_from_environment()
+        self.vision_message_builder       = VisionMessageBuilder.create_from_environment()
+        # 어느 스토리지를 바라보는지 기동 시 찍어 둔다 — 환경변수가 .env 를 이겨 엉뚱한 곳에 붙어도 로그로 바로 드러난다
+        print(self.image_upload_service.describe_storage_configuration(), flush = True)
+        print(f"VISION IMAGE MODE : inline_base64={self.vision_message_builder.is_inline_base64}", flush = True)
         self.binary_storage               = LocalFileBinaryStorage(os.getenv("ATTACHMENT_STORAGE_DIRECTORY", "./attachment_storage"))
         self.image_attachment_interceptor = ImageAttachmentInterceptor(self.binary_storage, detach_minimum_byte_count = int(os.getenv("ATTACHMENT_DETACH_MINIMUM_BYTE_COUNT", "4096")))
 
@@ -423,6 +443,7 @@ class ServerApplication:
         self.application.add_api_route("/diagnose",                     self.diagnose_thread_async,     methods = ["GET"])
         self.application.add_api_route("/models",                       self.list_models_async,         methods = ["GET"])
         self.application.add_api_route("/config/presets",              self.list_model_presets_async,  methods = ["GET"])
+        self.application.add_api_route("/api/upload",                  self.upload_image_async,        methods = ["POST"])   # 이미지 → MinIO
         self.application.add_api_route("/stream",                       self.stream_async,              methods = ["POST"])
         self.application.add_api_route("/rooms",                        self.list_rooms_async,          methods = ["GET"])
         self.application.add_api_route("/rooms",                        self.upsert_room_async,         methods = ["POST"])
@@ -725,6 +746,34 @@ ALTER TABLE chat_bookmark ADD COLUMN IF NOT EXISTS memo TEXT;
             )
             presets_object_dictionary[preset_name] = preset_object
         return ModelPresetsResponse(presets = presets_object_dictionary, available_preset_names = list(presets_object_dictionary.keys()))
+
+    async def upload_image_async(self, file : UploadFile = File(...), authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
+        # 이미지를 MinIO 에 올리고 Vision 모델이 읽을 수 있는 URL 을 돌려준다.
+        # 인증을 요구하는 이유 : 열어두면 누구나 사내 스토리지에 파일을 쌓을 수 있다.
+        self._require_authenticated_user_id(authorization)
+
+        if not self.image_upload_service.is_allowed_content_type(file.content_type):
+            raise HTTPException(status_code = 400, detail = "이미지 파일만 업로드할 수 있습니다. (png / jpeg / webp / gif)")
+
+        # 크기 검사는 파일을 통째로 읽어서 한다. UploadFile 은 스풀링되어 큰 파일은 디스크로 넘어가므로
+        # 메모리를 잡아먹지 않고, 헤더의 Content-Length 는 위조될 수 있어 믿지 않는다.
+        file_bytes = await file.read()
+        if len(file_bytes) == 0:
+            raise HTTPException(status_code = 400, detail = "빈 파일입니다.")
+        if len(file_bytes) > self.image_upload_service.maximum_byte_count:
+            maximum_megabyte = self.image_upload_service.maximum_byte_count / (1024 * 1024)
+            raise HTTPException(status_code = 413, detail = f"이미지가 너무 큽니다. (최대 {maximum_megabyte:.0f}MB)")
+
+        object_key    = self.image_upload_service.build_object_key(file.content_type)
+        is_uploaded   = await asyncio.to_thread(
+            self.image_upload_service.upload_image, io.BytesIO(file_bytes), object_key, file.content_type)
+        if not is_uploaded:
+            raise HTTPException(status_code = 502, detail = "이미지 저장소에 업로드하지 못했습니다. 스토리지 상태를 확인해주세요.")
+
+        image_url = await asyncio.to_thread(self.image_upload_service.build_image_url, object_key)
+        if not image_url:
+            raise HTTPException(status_code = 502, detail = "이미지 접근 URL 을 만들지 못했습니다.")
+        return {"object_key" : object_key, "image_url" : image_url, "content_type" : file.content_type, "byte_count" : len(file_bytes)}
 
     async def list_rooms_async(self, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
         # 인증된 사용자의 방 목록만 반환한다 (스코핑 키는 요청값이 아니라 토큰의 user_id)
@@ -1103,7 +1152,11 @@ ALTER TABLE chat_bookmark ADD COLUMN IF NOT EXISTS memo TEXT;
         referenced_context_block = ServerApplication._build_referenced_context_block(referenced_message_list)
         composed_message_text    = ServerApplication._build_referenced_message_text(
             stream_request.message, stream_request.referenced_text, referenced_context_block)
-        input_dictionary         = {"messages" : [HumanMessage(content = composed_message_text)]}
+        # 이미지가 붙어 있으면 멀티모달 content 블록으로, 없으면 지금까지처럼 문자열 그대로 넘긴다.
+        # (인라인 모드에서는 스토리지에서 이미지를 내려받으므로 블로킹 I/O 를 스레드로 뺀다)
+        composed_message_content = await asyncio.to_thread(
+            self.vision_message_builder.build_message_content, composed_message_text, stream_request.image_url_list)
+        input_dictionary         = {"messages" : [HumanMessage(content = composed_message_content)]}
         compiled_graph         = self._get_or_create_compiled_graph(stream_request.model, stream_request.reasoning_effort)
 
         # 대화 압축 : astream 이전에 요약을 만들어 chat_room 에 저장해 둔다.

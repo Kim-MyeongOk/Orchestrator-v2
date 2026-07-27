@@ -5,7 +5,7 @@ import { useState }  from "react";
 /* 사용자 질문 말풍선.
    마우스를 올리면 수정 버튼이 나타나고, 수정하면 이 질문 이후의 대화를 지우고 여기서부터 다시 이어간다. */
 
-export default function UserMessage({ text, referencedText, referencedAgentIndexList, userMessageIndex, isStreaming, onSubmitEdit, onBlockedEdit }) {
+export default function UserMessage({ text, referencedText, referencedAgentIndexList, imageUrlList, userMessageIndex, isStreaming, onSubmitEdit, onBlockedEdit }) {
     const [isEditing, setIsEditing]   = useState(false);
     const [draftText, setDraftText]   = useState(text);
     const textareaRef                 = useRef(null);
@@ -62,6 +62,18 @@ export default function UserMessage({ text, referencedText, referencedAgentIndex
                 ✎
             </button>
             <div className="max-w-[78%] md:max-w-[65%] bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed shadow">
+                {/* 함께 보낸 이미지 : 새 탭으로 원본을 열 수 있게 링크로 감싼다 */}
+                {(imageUrlList || []).length > 0 ? (
+                    <div className="mb-1.5 flex flex-wrap gap-1.5">
+                        {imageUrlList.map(imageUrl => (
+                            <a key={imageUrl} href={imageUrl} target="_blank" rel="noopener noreferrer"
+                               className="block w-20 h-20 rounded-lg overflow-hidden border border-slate-300 dark:border-slate-600 bg-slate-100 dark:bg-slate-800">
+                                <img src={imageUrl} alt="첨부 이미지" loading="lazy" className="w-full h-full object-cover" />
+                            </a>
+                        ))}
+                    </div>
+                ) : null}
+
                 {/* 통째로 참조한 답변 : 어떤 답변을 함께 보냈는지 번호로 되짚어 준다 */}
                 {(referencedAgentIndexList || []).length > 0 ? (
                     <p className="mb-1.5 flex flex-wrap gap-1">

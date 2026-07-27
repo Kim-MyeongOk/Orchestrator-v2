@@ -96,6 +96,7 @@ export default function ChatMessageList({
             return (
                 <UserMessage key={messageIndex} text={storedMessage.text} referencedText={storedMessage.referencedText}
                              referencedAgentIndexList={storedMessage.referencedAgentIndexList}
+                             imageUrlList={storedMessage.imageUrlList}
                              userMessageIndex={currentUserMessageIndex}
                              isStreaming={isStreaming} onSubmitEdit={onSubmitEdit} onBlockedEdit={onBlockedEdit} />
             );
