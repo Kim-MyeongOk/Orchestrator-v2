@@ -27,6 +27,7 @@ import { logout }                from "./api/chatApi";
 import { setApiUrl }              from "./api/chatApi";
 import { takeLogoutReasonText }   from "./api/chatApi";
 import { truncateThreadAsync }    from "./api/chatApi";
+import { uploadImageAsync }       from "./api/chatApi";
 
 import { DEVELOPER_MODE_STORAGE_KEY } from "./constants/storageKeys";
 import { INPUT_DRAFT_STORAGE_KEY }    from "./constants/storageKeys";
@@ -36,6 +37,7 @@ const STREAMING_STATUS = { text : "응답 중", toneClass : "bg-emerald-400 anim
 
 const REFERENCE_MAXIMUM_COUNT          = 10;   // 한 번에 담을 수 있는 답변 참조 개수 (서버 상한과 맞춘다)
 const REFERENCE_PREVIEW_MAXIMUM_LENGTH = 120;  // 칩 툴팁에 보여줄 답변 미리보기 길이
+const IMAGE_ATTACHMENT_MAXIMUM_COUNT   = 5;    // 한 질문에 붙일 수 있는 이미지 수 (서버 VisionMessageBuilder 와 맞춘다)
 
 // 세션 만료 안내 문구는 모듈이 로드될 때 한 번만 꺼내 온다.
 // 컴포넌트 안에서 꺼내면 StrictMode 의 이중 마운트 때 첫 마운트가 값을 소비해 버리고,
@@ -51,6 +53,8 @@ export default function App() {
     const [referencedText, setReferencedText]             = useState("");   // 답변에서 「참조하기」로 담은 발췌 (전송 후 비운다)
     // 우클릭으로 통째로 담은 이전 답변들 : [{ messageId, agentIndex, previewText }] (전송 후 비운다)
     const [selectedReferenceList, setSelectedReferenceList] = useState([]);
+    // 첨부한 이미지들 : [{ attachmentId, fileName, previewUrl, imageUrl, isUploading, errorText }] (전송 후 비운다)
+    const [attachedImageList, setAttachedImageList]         = useState([]);
     const [presetName, setPresetName]                     = useState("MEDIUM");   // LLM 파라미터 프리셋 (LOW/MEDIUM/HIGH)
     const [sidebarTabName, setSidebarTabName]             = useState("rooms");
     const [isResetModalOpen, setIsResetModalOpen]         = useState(false);
@@ -175,9 +179,18 @@ export default function App() {
     const onSend = useCallback(async () => {
         const messageText = inputValue.trim();
         if (!messageText || isStreaming || !activeRoom) return;
+
+        // 업로드가 끝나지 않은 이미지가 있으면 기다린다 — 지금 보내면 그 이미지는 빠진 채로 나간다
+        if (attachedImageList.some(attachedImage => attachedImage.isUploading)) {
+            showToast("⚠ 이미지 업로드가 끝난 뒤에 전송해주세요.");
+            return;
+        }
+        const uploadedImageUrlList = attachedImageList.filter(attachedImage => attachedImage.imageUrl).map(attachedImage => attachedImage.imageUrl);
+
         const sentTurnOption = {
             referencedText          : referencedText,
             referencedMessageIdList : selectedReferenceList.map(reference => reference.messageId),
+            imageUrlList            : uploadedImageUrlList,
             presetName              : presetName
         };
         stt.stopRecording();   // 받아쓰기가 켜진 채로 두면 방금 비운 입력창에 보낸 문장이 되살아난다
@@ -187,13 +200,16 @@ export default function App() {
         // 프리셋은 유지한다 (사용자가 명시적으로 바꿀 때까지).
         setReferencedText("");
         setSelectedReferenceList([]);
+        // 미리보기 URL 은 여기서 해제한다 — 말풍선은 MinIO URL 로 다시 그리므로 blob 이 필요 없다
+        attachedImageList.forEach(attachedImage => URL.revokeObjectURL(attachedImage.previewUrl));
+        setAttachedImageList([]);
         const finalStatus = await stream.sendMessageAsync(activeRoom, messageText, sentTurnOption);
         isSendInFlightRef.current = false;
         // 턴 도중 401 로 로그아웃됐으면 초안을 남겨 둔다 (다시 로그인하면 그대로 이어서 쓸 수 있다).
         // location.replace() 는 실행을 즉시 멈추지 않아 이 줄까지 흘러오므로, 토큰이 남아 있는지로 판별한다.
         if (getAuthToken()) localStorage.removeItem(INPUT_DRAFT_STORAGE_KEY);
         setStatusInfo(finalStatus);
-    }, [activeRoom, inputValue, isStreaming, referencedText, selectedReferenceList, presetName, stream, stt]);
+    }, [activeRoom, attachedImageList, inputValue, isStreaming, referencedText, selectedReferenceList, presetName, showToast, stream, stt]);
 
     const onRetryError = useCallback(async (errorMessage) => {
         if (isStreaming || !activeRoom) return;
@@ -239,6 +255,61 @@ export default function App() {
         setSelectedReferenceList([]);
         setReferencedText("");
     }, []);
+
+    /* ── 이미지 첨부 : MinIO 에 올리고 발급된 URL 을 질문과 함께 보낸다 ── */
+
+    const onRemoveImage = useCallback((attachmentId) => {
+        setAttachedImageList(previousList => {
+            const removedImage = previousList.find(attachedImage => attachedImage.attachmentId === attachmentId);
+            // createObjectURL 로 만든 미리보기는 직접 해제해야 메모리에서 사라진다
+            if (removedImage) URL.revokeObjectURL(removedImage.previewUrl);
+            return previousList.filter(attachedImage => attachedImage.attachmentId !== attachmentId);
+        });
+    }, []);
+
+    const onAttachImageFileList = useCallback(async (fileList) => {
+        if (isStreaming) { showToast("⚠ 응답 중에는 이미지를 첨부할 수 없습니다."); return; }
+
+        const imageFileList = fileList.filter(file => file.type.startsWith("image/"));
+        if (imageFileList.length < fileList.length) showToast("⚠ 이미지 파일만 첨부할 수 있습니다.");
+        if (imageFileList.length === 0) return;
+
+        // 먼저 로컬 미리보기를 띄우고(업로드를 기다리지 않는다) 업로드 결과로 각 항목을 갱신한다
+        const pendingImageList = imageFileList.slice(0, IMAGE_ATTACHMENT_MAXIMUM_COUNT).map(imageFile => ({
+            attachmentId : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            fileName     : imageFile.name,
+            previewUrl   : URL.createObjectURL(imageFile),
+            imageUrl     : "",
+            isUploading  : true,
+            errorText    : ""
+        }));
+
+        setAttachedImageList(previousList => {
+            const remainingSlotCount = IMAGE_ATTACHMENT_MAXIMUM_COUNT - previousList.length;
+            if (remainingSlotCount <= 0) {
+                showToast(`⚠ 이미지는 최대 ${IMAGE_ATTACHMENT_MAXIMUM_COUNT}장까지 첨부할 수 있습니다.`);
+                pendingImageList.forEach(pendingImage => URL.revokeObjectURL(pendingImage.previewUrl));
+                return previousList;
+            }
+            return [...previousList, ...pendingImageList.slice(0, remainingSlotCount)];
+        });
+
+        for (const [pendingIndex, pendingImage] of pendingImageList.entries()) {
+            try {
+                const { imageUrl } = await uploadImageAsync(imageFileList[pendingIndex]);
+                setAttachedImageList(previousList => previousList.map(attachedImage =>
+                    attachedImage.attachmentId === pendingImage.attachmentId
+                        ? { ...attachedImage, imageUrl : imageUrl, isUploading : false }
+                        : attachedImage));
+            } catch (uploadError) {
+                setAttachedImageList(previousList => previousList.map(attachedImage =>
+                    attachedImage.attachmentId === pendingImage.attachmentId
+                        ? { ...attachedImage, isUploading : false, errorText : uploadError.message }
+                        : attachedImage));
+                showToast(`⚠ ${pendingImage.fileName} 업로드 실패 : ${uploadError.message}`);
+            }
+        }
+    }, [isStreaming, showToast]);
 
     /* ── 음성 받아쓰기 : 인식 결과를 입력창에 이어 붙인다 ── */
 
@@ -295,6 +366,10 @@ export default function App() {
     const clearRoomScopedReference = useCallback(() => {
         setReferencedText("");
         setSelectedReferenceList([]);
+        setAttachedImageList(previousList => {
+            previousList.forEach(attachedImage => URL.revokeObjectURL(attachedImage.previewUrl));
+            return [];
+        });
     }, []);
 
     const onCreateRoom = useCallback(() => {
@@ -402,6 +477,9 @@ export default function App() {
                            referencedText={referencedText} onClearReference={() => setReferencedText("")}
                            selectedReferenceList={selectedReferenceList}
                            onRemoveReference={onRemoveReference} onClearAllReferences={onClearAllReferences}
+                           attachedImageList={attachedImageList}
+                           isUploadingImage={attachedImageList.some(attachedImage => attachedImage.isUploading)}
+                           onAttachImageFileList={onAttachImageFileList} onRemoveImage={onRemoveImage}
                            presetName={presetName} onPresetNameChange={setPresetName} availablePresetNames={availablePresetNames}
                            isRecognitionSupported={stt.isRecognitionSupported} isRecording={stt.isRecording} onToggleRecording={onToggleRecording} />
             </main>

@@ -19,29 +19,32 @@ model_info :
     qwen3_vl_local :
         provider                  : ollama
         name                      : qwen3-vl:4b
-        api_key                   :
+        api_key                   : ${oc.env:OLLAMA_API_KEY,null}
         base_url                  : http://localhost:11434
-        enable                    : false
+        enable                    : true
         temperature               : 0.0
         maximum_token_count       : 4096
         context_token_count       : 8192
         timeout_second_count      : 120.0
         maximum_retry_count       : 2
         default_header_dictionary :
+            Authorization : "Bearer ${oc.env:OLLAMA_API_KEY,null}"
         extra_body                :
         reasoning_enabled         : true
 
-    qwen3_5_27b :
+    llama3_2_vision :
         provider                  : ollama
-        name                      : qwen3.5:27b
-        api_key                   :
+        name                      : llama3.2-vision
+        api_key                   : ${oc.env:OLLAMA_API_KEY,null}
         base_url                  : http://localhost:11434
-        enable                    : false
+        enable                    : true
         temperature               : 0.0
         maximum_token_count       : 4096
-        context_token_count       : 32768
+        context_token_count       : 16384
         timeout_second_count      : 120.0
         maximum_retry_count       : 2
+        default_header_dictionary :
+            Authorization : "Bearer ${oc.env:OLLAMA_API_KEY,null}"
         reasoning_enabled         : false
 
     gpt_oss_120b :
