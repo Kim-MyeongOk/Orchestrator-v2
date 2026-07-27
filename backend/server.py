@@ -280,6 +280,7 @@ class ServerApplication:
     REFERENCED_MESSAGE_MAXIMUM_COUNT  = 10    # 통째로 참조할 수 있는 이전 답변 개수 (기본값 : 10)
     REFERENCED_MESSAGE_MAXIMUM_LENGTH = 4000  # 참조 답변 1건당 최대 길이 (기본값 : 4000)
     REFERENCED_MESSAGE_ID_PREFIX      = "agent-"   # 답변 ID 형식 : agent-{답변 순번(0부터)}
+    DUPLICATE_USER_MESSAGE            = "이미 등록된 유저입니다."   # 회원가입 중복 ID 안내 (409 응답 본문에 그대로 실린다)
 
     def __init__(self) -> None:
         load_dotenv()
@@ -659,7 +660,9 @@ ALTER TABLE chat_bookmark ADD COLUMN IF NOT EXISTS memo TEXT;
         password_hash = PasswordHelper.hash_password(password)
         is_created    = await self.user_repository.create_user_async(user_id, password_hash)
         if not is_created:
-            raise HTTPException(status_code = 409, detail = f"USER ALREADY EXISTS : {user_id}")
+            # 화면에 그대로 띄우는 문구라 한국어로 내려준다 (다른 오류 메시지는 개발자용이라 영어를 유지).
+            # 응답에 user_id 를 되싣지 않는다 — 아무나 가입 API 를 두드려 계정 존재 여부를 확인할 수 있게 되기 때문.
+            raise HTTPException(status_code = 409, detail = ServerApplication.DUPLICATE_USER_MESSAGE)
         return {"user_id" : user_id, "token" : self._issue_token(user_id), "status" : "registered"}
 
     async def login_user_async(self, login_request : LoginRequest) -> Dict[str, Any]:
