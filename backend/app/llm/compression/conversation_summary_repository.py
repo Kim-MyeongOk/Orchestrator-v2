@@ -1,6 +1,8 @@
 from typing import Optional
 from typing import Tuple
 
+from app.database.table_query.chat_room_query import ChatRoomQuery
+
 
 ##################################################
 # 대화 요약 저장소 (chat_room.summary)
@@ -19,8 +21,7 @@ class ConversationSummaryRepository:
     async def get_summary_state_async(self, thread_id : str) -> Tuple[Optional[str], int]:
         # (요약문, 요약에 반영된 메시지 개수) 를 반환한다. 방이 아직 없으면 (None, 0)
         async with self.checkpoint_connection_pool.connection() as connection:
-            cursor = await connection.execute(
-                "SELECT summary, summarized_message_count FROM chat_room WHERE thread_id = %s LIMIT 1", (thread_id,))
+            cursor = await connection.execute(ChatRoomQuery.SELECT_SUMMARY, (thread_id,))
             summary_row = await cursor.fetchone()
         if summary_row is None:
             return None, 0
@@ -29,12 +30,9 @@ class ConversationSummaryRepository:
     async def update_summary_async(self, thread_id : str, summary : str, summarized_message_count : int) -> None:
         async with self.checkpoint_connection_pool.connection() as connection:
             await connection.execute(
-                "UPDATE chat_room SET summary = %s, summarized_message_count = %s, summary_updated_at = NOW() WHERE thread_id = %s",
-                (summary, summarized_message_count, thread_id))
+                ChatRoomQuery.UPDATE_SUMMARY, (summary, summarized_message_count, thread_id))
 
     async def clear_summary_async(self, thread_id : str) -> None:
         # 질문 수정으로 대화가 절단된 경우 : 요약이 사라진 대화를 가리키게 되므로 초기화한다
         async with self.checkpoint_connection_pool.connection() as connection:
-            await connection.execute(
-                "UPDATE chat_room SET summary = NULL, summarized_message_count = 0, summary_updated_at = NULL WHERE thread_id = %s",
-                (thread_id,))
+            await connection.execute(ChatRoomQuery.CLEAR_SUMMARY, (thread_id,))

@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi import HTTPException
 
 from app.auth.user_repository              import UserRepository
+from app.database.table_query.chat_room_query import ChatRoomQuery
 from app.monitor.api.login_request         import LoginRequest
 from app.monitor.api.register_request      import RegisterRequest
 from common.security.auth_token_helper     import AuthTokenHelper
@@ -55,7 +56,7 @@ class AuthService:
         # 미등록(신규) 스레드나 본인 소유 스레드는 허용한다.
         async with self.checkpoint_connection_pool.connection() as connection:
             cursor = await connection.execute(
-                "SELECT 1 FROM chat_room WHERE thread_id = %s AND user_id <> %s LIMIT 1", (thread_id, user_id))
+                ChatRoomQuery.SELECT_FOREIGN_OWNER_BY_THREAD, (thread_id, user_id))
             if await cursor.fetchone() is not None:
                 raise HTTPException(status_code = 403, detail = "THREAD ACCESS DENIED")
 

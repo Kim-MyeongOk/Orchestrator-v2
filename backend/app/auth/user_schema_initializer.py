@@ -1,23 +1,20 @@
+from app.database.table_query_registry                  import TableQueryRegistry
 from common.database.postgresql.postgresql_pool_manager import PostgresqlPoolManager
 
 ##################################################
-# 사용자 스키마 초기화기
-# 로그인 계정 테이블(chat_user)을 생성한다. user_id 는 로그인 식별자이자 채팅 스코핑 키로,
-# chat_room.user_id(TEXT)와 동일한 타입이라 방 목록/대화가 같은 ID 로 이어진다.
+# 사용자 스키마 초기화기 (asyncpg 풀)
+#
+# DDL 을 여기에 두지 않고 app/database/table_query/*_query.py 에서 가져온다.
+# 테이블을 추가할 때 이 파일을 고칠 필요가 없다 — 쿼리 파일 하나만 만들면 자동으로 포함된다.
+# (asyncpg 풀에서 만들 테이블은 쿼리 클래스에 IS_ASYNCPG = True 를 둔다)
 ##################################################
 class UserSchemaInitializer:
-    SCHEMA_DDL = """
-CREATE TABLE IF NOT EXISTS chat_user
-(
-    user_id       TEXT        PRIMARY KEY,
-    password_hash TEXT        NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-"""
-
     def __init__(self, postgresql_pool_manager : PostgresqlPoolManager) -> None:
         self.postgresql_pool_manager = postgresql_pool_manager
 
     async def initialize_schema_async(self) -> None:
+        table_query_class_list = TableQueryRegistry.load_asyncpg_table_query_class_list()
         async with self.postgresql_pool_manager.get_pool().acquire() as connection:
-            await connection.execute(UserSchemaInitializer.SCHEMA_DDL)
+            for table_query_class in table_query_class_list:
+                await connection.execute(table_query_class.CREATE_TABLE)
+        print(f"ASYNCPG TABLE READY : {[table_query_class.TABLE_NAME for table_query_class in table_query_class_list]}", flush = True)

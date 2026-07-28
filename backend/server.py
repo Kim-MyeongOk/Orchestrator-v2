@@ -58,6 +58,7 @@ from common.cache.redis_stream.redis_client_factory            import RedisClien
 from common.cache.redis_stream.redis_configuration_factory     import RedisConfigurationFactory
 from common.security.auth_secret_helper                        import AuthSecretHelper
 from common.security.auth_token_renewal_middleware             import AuthTokenRenewalMiddleware
+from app.database.table_query_registry                         import TableQueryRegistry
 from app.auth.user_schema_initializer                          import UserSchemaInitializer
 from app.auth.user_repository                                  import UserRepository
 from app.llm.job.job_configuration                             import JobConfiguration
@@ -474,50 +475,14 @@ class ServerApplication:
         # 모니터 기본 모델 그래프 선생성 (체크포인터 공유)
         self._get_or_create_compiled_graph(None)
 
-        # 유저별 채팅방 목록 테이블 (대화 내용은 체크포인트가 원본이므로 여기는 목록/메타만 저장)
+        # 모니터 테이블 DDL : app/database/table_query/*_query.py 에서 자동으로 모아 순서대로 만든다.
+        # 테이블을 추가할 때 이 파일을 고칠 필요가 없다 — 쿼리 파일 하나만 만들면 된다.
+        # (CREATION_ORDER 로 정렬되므로 외래키가 걸린 테이블도 참조 대상 뒤에 생성된다)
+        monitor_table_query_class_list = TableQueryRegistry.load_psycopg_table_query_class_list()
         async with self.checkpoint_connection_pool.connection() as connection:
-            await connection.execute("""
-CREATE TABLE IF NOT EXISTS chat_room
-(
-    room_id          TEXT        PRIMARY KEY,
-    user_id          TEXT        NOT NULL,
-    thread_id        TEXT        NOT NULL,
-    title            TEXT        NOT NULL DEFAULT '새 대화',
-    model            TEXT,
-    reasoning_effort TEXT,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_chat_room_user_updated ON chat_room (user_id, updated_at DESC);
-
--- 대화 압축 상태 : 방을 나갔다 들어와도 요약이 유지되도록 chat_room 에 함께 둔다.
--- (기존 배포에도 붙어야 하므로 CREATE 가 아니라 ADD COLUMN IF NOT EXISTS 로 추가한다)
--- summarized_message_count : 어디까지 요약에 반영했는지 — 없으면 압축할 때마다 옛 대화를 다시 요약한다.
-ALTER TABLE chat_room ADD COLUMN IF NOT EXISTS summary                  TEXT;
-ALTER TABLE chat_room ADD COLUMN IF NOT EXISTS summarized_message_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE chat_room ADD COLUMN IF NOT EXISTS summary_updated_at       TIMESTAMPTZ;
-
--- 북마크 : "방 안에서 N 번째 답변"단위로 저장한다.
--- chat_room 에 불리언 칼럼을 두지 않는 이유 : thread_id 는 대화 전체를 가리키므로 답변 하나를 지목할 수 없다.
--- text 는 미리보기 스냅샷 — 이게 없으면 사이드바 목록을 그릴 때마다 방마다 체크포인트를 통째로 열어야 한다.
-CREATE TABLE IF NOT EXISTS chat_bookmark
-(
-    bookmark_id  TEXT        PRIMARY KEY,
-    user_id      TEXT        NOT NULL,
-    room_id      TEXT        NOT NULL REFERENCES chat_room (room_id) ON DELETE CASCADE,
-    agent_index  INTEGER     NOT NULL,
-    text         TEXT        NOT NULL DEFAULT '',
-    completed_at TIMESTAMPTZ,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (room_id, agent_index)
-);
-CREATE INDEX IF NOT EXISTS idx_chat_bookmark_user_created ON chat_bookmark (user_id, created_at DESC);
-
--- 메모 : 북마크한 답변에 사용자가 직접 남기는 짧은 기록.
--- (기존 배포에도 붙어야 하므로 CREATE 가 아니라 ADD COLUMN IF NOT EXISTS 로 추가한다)
--- NULL 은 "메모 없음" — 빈 문자열과 구분해 두어야 upsert 시 COALESCE 로 기존 메모를 보존할 수 있다.
-ALTER TABLE chat_bookmark ADD COLUMN IF NOT EXISTS memo TEXT;
-""")
+            for table_query_class in monitor_table_query_class_list:
+                await connection.execute(table_query_class.CREATE_TABLE)
+        print(f"MONITOR TABLE READY : {[table_query_class.TABLE_NAME for table_query_class in monitor_table_query_class_list]}", flush = True)
 
     ##################################################
     # 모니터 라우트 핸들러
