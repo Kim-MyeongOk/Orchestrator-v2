@@ -1,191 +1,29 @@
+##################################################
+# Job 스키마 초기화기 (asyncpg 풀)
+#
+# DDL 을 여기에 두지 않고 app/database/table_query/*_query.py 에서 가져온다.
+# 테이블을 추가할 때 이 파일을 고칠 필요가 없다 — 쿼리 파일 하나만 만들면 자동으로 포함된다.
+#
+# 생성 순서는 각 쿼리 클래스의 CREATION_ORDER 가 정한다 (외래키 참조 순서).
+#   llm_job(110) → llm_thread(120) → llm_job_message(130) → llm_thread_message(140)
+#   → llm_job_chunk(150) → llm_job_task(160) → llm_job_event(170)
+#
+# 참고 : checkpoints / checkpoint_migrations 계열은 여기서 다루지 않는다.
+#        LangGraph 의 MIGRATIONS 최종 스키마와 정확히 일치해야 하고 파티션 수가 런타임 변수라
+#        CheckpointSchemaInitializer 가 따로 관리한다.
+##################################################
+
+from app.database.table_query_registry                  import TableQueryRegistry
 from common.database.postgresql.postgresql_pool_manager import PostgresqlPoolManager
 
+
 class JobSchemaInitializer:
-    SCHEMA_DDL = """
--- 작업 마스터
-CREATE TABLE IF NOT EXISTS llm_job
-(
-    run_id                     UUID        PRIMARY KEY,
-    thread_id                  UUID        NOT NULL,
-    user_id                    UUID        NOT NULL,
-    job_type                   VARCHAR(20) NOT NULL,
-    status                     VARCHAR(20) NOT NULL,
-    output_format              VARCHAR(20) NOT NULL DEFAULT 'deepagents',
-    request_payload            JSONB       NOT NULL,
-    error_message              TEXT,
-    usage                      JSONB,
-    message_count              INTEGER     NOT NULL DEFAULT 0,
-    event_count                INTEGER     NOT NULL DEFAULT 0,
-    last_sequence_number       INTEGER     NOT NULL DEFAULT 0,
-    chunk_count                INTEGER     NOT NULL DEFAULT 0,
-    task_count                 INTEGER     NOT NULL DEFAULT 0,
-    turn_number                INTEGER     NOT NULL DEFAULT 1,
-    has_complete_chunk_history BOOLEAN     NOT NULL DEFAULT TRUE,
-    runtime_metadata           JSONB,
-    idempotency_key            VARCHAR(200),
-    created_user_id            UUID        NOT NULL,
-    updated_user_id            UUID        NOT NULL,
-    created_at                 TIMESTAMPTZ NOT NULL,
-    started_at                 TIMESTAMPTZ,
-    completed_at               TIMESTAMPTZ,
-    updated_at                 TIMESTAMPTZ NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_llm_job_user_created        ON llm_job (user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_llm_job_user_status         ON llm_job (user_id, status, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_llm_job_thread              ON llm_job (thread_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_llm_job_active_updated      ON llm_job (updated_at) WHERE status IN ('pending', 'running');
-CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_job_idempotency   ON llm_job (idempotency_key) WHERE idempotency_key IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_job_thread_active ON llm_job (thread_id) WHERE status IN ('pending', 'running');
-
-CREATE TABLE IF NOT EXISTS llm_thread
-(
-    thread_id            UUID        PRIMARY KEY,
-    user_id              UUID        NOT NULL,
-    title                TEXT        NOT NULL,
-    last_message_preview TEXT,
-    latest_run_id        UUID,
-    latest_status        VARCHAR(20),
-    created_at           TIMESTAMPTZ NOT NULL,
-    updated_at           TIMESTAMPTZ NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_llm_thread_user_updated ON llm_thread (user_id, updated_at DESC, thread_id DESC);
-
--- 병합 메시지 (messages 청크의 최종 병합 결과)
-CREATE TABLE IF NOT EXISTS llm_job_message
-(
-    id                UUID         PRIMARY KEY,
-    run_id            UUID         NOT NULL,
-    thread_id         UUID         NOT NULL,
-    message_id        VARCHAR(200) NOT NULL,
-    ns_path           TEXT         NOT NULL DEFAULT '',
-    task_id           VARCHAR(200),
-    parent_task_id    VARCHAR(200),
-    message_metadata  JSONB,
-    message_type      VARCHAR(50),
-    tool_call_id      VARCHAR(200),
-    agent_name        VARCHAR(200),
-    is_root_message   BOOLEAN      NOT NULL DEFAULT FALSE,
-    role              VARCHAR(20)  NOT NULL,
-    content           JSONB        NOT NULL,
-    tool_call_list    JSONB,
-    usage             JSONB,
-    response_metadata JSONB,
-    seq_first         INTEGER      NOT NULL,
-    seq_last          INTEGER      NOT NULL,
-    created_at        TIMESTAMPTZ  NOT NULL,
-    UNIQUE (run_id, ns_path, message_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_llm_job_message_run    ON llm_job_message (run_id, seq_first);
-CREATE INDEX IF NOT EXISTS idx_llm_job_message_thread ON llm_job_message (thread_id, created_at);
-
-CREATE TABLE IF NOT EXISTS llm_thread_message
-(
-    id                 UUID         PRIMARY KEY,
-    thread_id          UUID         NOT NULL,
-    run_id             UUID         NOT NULL,
-    turn_number        INTEGER      NOT NULL,
-    message_order      INTEGER      NOT NULL,
-    role               VARCHAR(20)  NOT NULL,
-    content            TEXT         NOT NULL,
-    source_message_id  VARCHAR(200),
-    source_task_id     VARCHAR(200),
-    is_display_message BOOLEAN      NOT NULL DEFAULT TRUE,
-    created_at         TIMESTAMPTZ  NOT NULL,
-    UNIQUE (run_id, message_order, role)
-);
-
-CREATE INDEX IF NOT EXISTS idx_llm_thread_message_thread ON llm_thread_message (thread_id, turn_number, message_order);
-
-CREATE TABLE IF NOT EXISTS llm_job_chunk
-(
-    id                UUID         PRIMARY KEY,
-    run_id            UUID         NOT NULL,
-    seq               INTEGER      NOT NULL,
-    chunk_type        VARCHAR(20)  NOT NULL,
-    ns_list           JSONB        NOT NULL,
-    ns_path           TEXT         NOT NULL DEFAULT '',
-    task_id           VARCHAR(200),
-    parent_task_id    VARCHAR(200),
-    task_link_type    VARCHAR(20),
-    data              JSONB        NOT NULL,
-    stream_version    VARCHAR(50)  NOT NULL DEFAULT 'langgraph-v2',
-    schema_version    INTEGER      NOT NULL DEFAULT 1,
-    projection_status VARCHAR(20)  NOT NULL DEFAULT 'pending',
-    created_at        TIMESTAMPTZ  NOT NULL,
-    UNIQUE (run_id, seq),
-    CHECK (seq > 0),
-    CHECK (chunk_type IN ('tasks', 'messages', 'custom'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_llm_job_chunk_run_task ON llm_job_chunk (run_id, task_id, seq);
-CREATE INDEX IF NOT EXISTS idx_llm_job_chunk_run_type ON llm_job_chunk (run_id, chunk_type, seq);
-
-CREATE TABLE IF NOT EXISTS llm_job_task
-(
-    run_id                    UUID         NOT NULL,
-    task_id                   VARCHAR(200) NOT NULL,
-    parent_task_id            VARCHAR(200),
-    task_name                 VARCHAR(200),
-    agent_name                VARCHAR(200),
-    status                    VARCHAR(30)  NOT NULL,
-    input                     JSONB,
-    result                    JSONB,
-    error_message             TEXT,
-    interrupt_list            JSONB,
-    trigger_list              JSONB,
-    metadata                  JSONB,
-    started_sequence_number   INTEGER,
-    completed_sequence_number INTEGER,
-    started_at                TIMESTAMPTZ,
-    completed_at              TIMESTAMPTZ,
-    updated_at                TIMESTAMPTZ NOT NULL,
-    is_status_inferred        BOOLEAN     NOT NULL DEFAULT FALSE,
-    PRIMARY KEY (run_id, task_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_llm_job_task_run_status ON llm_job_task (run_id, status, started_sequence_number);
-
--- tasks / custom 이벤트 로그 (청크 단위 저장)
-CREATE TABLE IF NOT EXISTS llm_job_event (
-    id         UUID        PRIMARY KEY,
-    run_id     UUID        NOT NULL,
-    seq        INTEGER     NOT NULL,
-    chunk_type VARCHAR(20) NOT NULL,
-    ns_path    TEXT        NOT NULL DEFAULT '',
-    data       JSONB       NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL,
-    UNIQUE (run_id, seq)
-);
-
-CREATE INDEX IF NOT EXISTS idx_llm_job_event_run ON llm_job_event (run_id, seq);
-
-ALTER TABLE llm_job         ADD COLUMN IF NOT EXISTS last_sequence_number INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE llm_job         ADD COLUMN IF NOT EXISTS chunk_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE llm_job         ADD COLUMN IF NOT EXISTS task_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE llm_job         ADD COLUMN IF NOT EXISTS turn_number INTEGER NOT NULL DEFAULT 1;
-ALTER TABLE llm_job         ADD COLUMN IF NOT EXISTS has_complete_chunk_history BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE llm_job         ADD COLUMN IF NOT EXISTS runtime_metadata JSONB;
-ALTER TABLE llm_job_message ADD COLUMN IF NOT EXISTS task_id VARCHAR(200);
-ALTER TABLE llm_job_message ADD COLUMN IF NOT EXISTS parent_task_id VARCHAR(200);
-ALTER TABLE llm_job_message ADD COLUMN IF NOT EXISTS message_metadata JSONB;
-ALTER TABLE llm_job_message ADD COLUMN IF NOT EXISTS message_type VARCHAR(50);
-ALTER TABLE llm_job_message ADD COLUMN IF NOT EXISTS tool_call_id VARCHAR(200);
-ALTER TABLE llm_job_message ADD COLUMN IF NOT EXISTS agent_name VARCHAR(200);
-ALTER TABLE llm_job_message ADD COLUMN IF NOT EXISTS is_root_message BOOLEAN NOT NULL DEFAULT FALSE;
-CREATE INDEX IF NOT EXISTS idx_llm_job_message_task   ON llm_job_message (run_id, task_id, seq_first);
-
--- 오케스트레이터 도메인 통합 컬럼 (orch_run / orch_message 흡수)
-ALTER TABLE llm_job         ADD COLUMN IF NOT EXISTS final_output JSONB;
-ALTER TABLE llm_job         ADD COLUMN IF NOT EXISTS aggregated_event JSONB;
-ALTER TABLE llm_job_message ADD COLUMN IF NOT EXISTS files_metadata JSONB;
-"""
-
     def __init__(self, postgresql_pool_manager : PostgresqlPoolManager) -> None:
         self.postgresql_pool_manager = postgresql_pool_manager
 
     async def initialize_schema_async(self) -> None:
+        table_query_class_list = TableQueryRegistry.load_asyncpg_table_query_class_list()
         async with self.postgresql_pool_manager.get_pool().acquire() as connection:
-            await connection.execute(JobSchemaInitializer.SCHEMA_DDL)
+            for table_query_class in table_query_class_list:
+                await connection.execute(table_query_class.CREATE_TABLE)
+        print(f"ASYNCPG TABLE READY : {[table_query_class.TABLE_NAME for table_query_class in table_query_class_list]}", flush = True)

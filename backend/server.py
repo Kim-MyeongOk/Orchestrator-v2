@@ -59,7 +59,6 @@ from common.cache.redis_stream.redis_configuration_factory     import RedisConfi
 from common.security.auth_secret_helper                        import AuthSecretHelper
 from common.security.auth_token_renewal_middleware             import AuthTokenRenewalMiddleware
 from app.database.table_query_registry                         import TableQueryRegistry
-from app.auth.user_schema_initializer                          import UserSchemaInitializer
 from app.auth.user_repository                                  import UserRepository
 from app.llm.job.job_configuration                             import JobConfiguration
 from app.llm.repository.job_repository                         import JobRepository
@@ -157,7 +156,6 @@ class ServerApplication:
         self.chat_thread_repository  = ChatThreadRepository(self.postgresql_pool_manager)
         self.thread_message_repository = ThreadMessageRepository(self.postgresql_pool_manager)
         self.job_schema_initializer  = JobSchemaInitializer(self.postgresql_pool_manager)
-        self.user_schema_initializer = UserSchemaInitializer(self.postgresql_pool_manager)
         self.user_repository         = UserRepository(self.postgresql_pool_manager)
         # 대화 압축 : 설정은 기동 시 확정하고, 저장소/생성기는 체크포인트 풀이 열린 뒤 주입한다
         self.compression_configuration       = ServerApplication._get_context_compression_configuration()
@@ -695,8 +693,8 @@ class ServerApplication:
     async def lifespan_async(self, fast_api : FastAPI) -> AsyncIterator[None]:
         await self.postgresql_pool_manager.open_async()
         try:
+            # asyncpg 테이블(llm_* + chat_user) DDL — TableQueryRegistry 가 자동 수집한다
             await self.job_schema_initializer.initialize_schema_async()
-            await self.user_schema_initializer.initialize_schema_async()
             await self._initialize_checkpointer_async()
             await self.redis_stream_client.open_async()
             await self.redis_stream_client.ping_async()
