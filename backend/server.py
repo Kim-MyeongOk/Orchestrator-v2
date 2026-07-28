@@ -14,15 +14,12 @@
 #   실행 : python backend/server.py   (기본 포트 8000)
 ##################################################
 
-import io
 import os
-import re
 import sys
 import json
 import time
 import dataclasses
 import uuid
-import secrets
 import asyncio
 import uvicorn
 
@@ -33,7 +30,6 @@ if sys.platform == "win32":
 from dotenv                  import load_dotenv
 from fastapi                 import FastAPI
 from fastapi                 import File
-from fastapi                 import HTTPException
 from fastapi                 import Header
 from fastapi                 import UploadFile
 from fastapi.responses       import StreamingResponse
@@ -43,16 +39,10 @@ from contextlib              import asynccontextmanager
 from typing                  import Any
 from typing                  import AsyncIterator
 from typing                  import Dict
-from typing                  import List
 from typing                  import Optional
 from redis.asyncio           import Redis
-from pydantic                import BaseModel
-from pydantic                import Field
 
-from langchain_core.messages           import BaseMessage
 from langchain_core.messages           import HumanMessage
-from langchain_core.messages           import RemoveMessage
-from langchain.agents.middleware.types import AgentMiddleware
 
 # .env 는 프로젝트 모듈을 불러오기 전에 읽어야 한다.
 # common/storage/s3_helper.py 의 s3_helper 싱글톤은 임포트되는 순간 os.getenv 로 접속 정보를 확정하는데,
@@ -66,11 +56,8 @@ from common.identifier.uuid_v7.uuid_v7_generator               import UUIDV7Gene
 from common.config.environment_variable_helper                 import EnvironmentVariableHelper
 from common.cache.redis_stream.redis_client_factory            import RedisClientFactory
 from common.cache.redis_stream.redis_configuration_factory     import RedisConfigurationFactory
-from common.security.password_helper                           import PasswordHelper
-from common.security.auth_token_helper                         import AuthTokenHelper
 from common.security.auth_secret_helper                        import AuthSecretHelper
 from common.security.auth_token_renewal_middleware             import AuthTokenRenewalMiddleware
-from common.config.model_preset_loader                         import ModelPresetLoader
 from app.auth.user_schema_initializer                          import UserSchemaInitializer
 from app.auth.user_repository                                  import UserRepository
 from app.llm.job.job_configuration                             import JobConfiguration
@@ -89,12 +76,27 @@ from app.llm.job.job_subscription.job_subscription             import JobSubscri
 from app.llm.job.job_manager.job_reaper                        import JobReaper
 from app.llm.api.llm_api_router                                import LLMAPIRouter
 from app.llm.api.chat_api_router                               import ChatAPIRouter
-from app.llm.api.model_preset_response                         import ModelPreset
 from app.llm.api.model_preset_response                         import ModelPresetsResponse
-from app.llm.api.model_preset_response                         import ParameterSet
 from app.llm.chat.chat_query_service                           import ChatQueryService
 from app.llm.image.image_upload_service                        import ImageUploadService
 from app.llm.image.vision_message_builder                      import VisionMessageBuilder
+from app.llm.agent.think_trimming_middleware                   import ThinkTrimmingMiddleware
+from app.llm.reference.reference_context_builder               import ReferenceContextBuilder
+from app.monitor.api.bookmark_memo_update_request              import BookmarkMemoUpdateRequest
+from app.monitor.api.bookmark_upsert_request                   import BookmarkUpsertRequest
+from app.monitor.api.compressed_info_response                  import CompressedInfoResponse
+from app.monitor.api.login_request                             import LoginRequest
+from app.monitor.api.register_request                          import RegisterRequest
+from app.monitor.api.room_upsert_request                       import RoomUpsertRequest
+from app.monitor.api.stream_request                            import StreamRequest
+from app.monitor.api.truncate_thread_request                   import TruncateThreadRequest
+from app.monitor.service.auth_service                          import AuthService
+from app.monitor.service.bookmark_service                      import BookmarkService
+from app.monitor.service.debug_service                         import DebugService
+from app.monitor.service.image_upload_handler                  import ImageUploadHandler
+from app.monitor.service.model_catalog_service                 import ModelCatalogService
+from app.monitor.service.room_service                          import RoomService
+from app.monitor.service.thread_service                        import ThreadService
 from common.database.postgresql.postgresql_configuration       import PostgresqlConfiguration
 from common.cache.redis_stream.redis_configuration             import RedisConfiguration
 from app.llm.agent.model_configuration                         import ModelConfiguration
@@ -119,66 +121,8 @@ from app.orchestrator.service.graph_stream_executor            import GraphStrea
 from app.orchestrator.service.redis_chunk_buffer               import RedisChunkBuffer
 
 ##################################################
-# 생각 토큰(reasoning) 감지/트리밍 유틸리티
+# 모니터 그래프용 모델 설정 폴백
 ##################################################
-
-# <think>...</think> 인라인 태그 (일부 서빙 조합은 생각 토큰을 content 안에 인라인으로 넣는다)
-THINK_TAG_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
-
-
-def _to_text(raw_value : Any) -> str:
-    # Redis 응답 정규화 : decode_responses 설정과 무관하게 항상 str 로 만든다 (bytes 면 디코드)
-    return raw_value.decode("utf-8", errors = "replace") if isinstance(raw_value, bytes) else str(raw_value)
-
-
-def _extract_think_byte_count(message : BaseMessage) -> int:
-    # 메시지 1건에서 생각 토큰이 차지하는 바이트 수를 계산한다
-    # ① content 인라인 <think> 태그  ② additional_kwargs.reasoning_content (langchain-ollama 분리 저장 경로)
-    think_byte_count = 0
-    if isinstance(message.content, str):
-        for think_text in THINK_TAG_PATTERN.findall(message.content):
-            think_byte_count += len(think_text.encode("utf-8"))
-    reasoning_text = (message.additional_kwargs or {}).get("reasoning_content")
-    if isinstance(reasoning_text, str):
-        think_byte_count += len(reasoning_text.encode("utf-8"))
-    return think_byte_count
-
-
-def prepare_model_input(message_list : List[BaseMessage], window_message_count : int = 20) -> List[BaseMessage]:
-    # ① 트리밍 : 과거 메시지의 <think> 인라인 태그와 reasoning_content 를 제거한다
-    # ② 윈도잉 : 최근 N개 메시지만 유지해 프리필 상한을 고정한다 (오래된 대화는 프롬프트에서 제외)
-    slim_message_list = []
-    for message in message_list[-window_message_count:]:
-        updated_fields : Dict[str, Any] = {}
-        if isinstance(message.content, str) and "<think>" in message.content:
-            updated_fields["content"] = THINK_TAG_PATTERN.sub("", message.content).strip()
-        if isinstance(message.content, list) and any(isinstance(content_block, dict) and content_block.get("type") == "thinking" for content_block in message.content):
-            # google(Gemini) : content 리스트 안의 thinking 블록 제거
-            updated_fields["content"] = [content_block for content_block in message.content if not (isinstance(content_block, dict) and content_block.get("type") == "thinking")]
-        if (message.additional_kwargs or {}).get("reasoning_content"):
-            updated_fields["additional_kwargs"] = {key : value for key, value in message.additional_kwargs.items() if key != "reasoning_content"}
-        slim_message_list.append(message.model_copy(update = updated_fields) if updated_fields else message)
-    return slim_message_list
-
-
-def _extract_message_texts(message : BaseMessage) -> tuple:
-    # 저장 메시지 1건에서 (본문 텍스트, 생각 텍스트) 를 추출한다
-    # ollama 는 additional_kwargs.reasoning_content, google(Gemini) 은 content 리스트의 thinking 블록
-    reasoning_text = (getattr(message, "additional_kwargs", None) or {}).get("reasoning_content", "") or ""
-    body_text      = ""
-    if isinstance(message.content, str):
-        body_text = message.content
-    elif isinstance(message.content, list):
-        for content_block in message.content:
-            if isinstance(content_block, str):
-                body_text += content_block
-            elif isinstance(content_block, dict):
-                if content_block.get("type") == "thinking":
-                    reasoning_text += content_block.get("thinking", "")
-                elif content_block.get("type") == "text":
-                    body_text += content_block.get("text", "")
-    return body_text.strip(), reasoning_text
-
 
 def _create_legacy_model_configuration(model_name : Optional[str] = None, reasoning_effort : Optional[str] = None) -> ModelConfiguration:
     # 모니터 그래프용 : 모델 카탈로그(config/models.yaml)가 없을 때의 .env(MODEL_*) 폴백 경로
@@ -196,105 +140,7 @@ def _create_legacy_model_configuration(model_name : Optional[str] = None, reason
     )
 
 
-##################################################
-# [병목 해결 가이드] 생각 토큰 트리밍 + 윈도잉 미들웨어
-#
-# 원칙 : 체크포인트(원본 상태)는 건드리지 않고, "모델에게 보내는 프롬프트"만
-# 슬림하게 만든다. before_model 훅은 반환값이 체크포인트에 다시 기록되므로 쓰지 않는다 —
-# awrap_model_call 은 모델 요청(ModelRequest)만 override 하고 State 는 그대로 둔다.
-##################################################
-class ThinkTrimmingMiddleware(AgentMiddleware):
-    # 모델 호출 직전에만 트리밍+윈도잉을 적용한다 (체크포인트 원본 보존)
-    def __init__(self, window_message_count : int = 20) -> None:
-        super().__init__()
-        self.window_message_count = window_message_count
-
-    async def awrap_model_call(self, request, handler):
-        slim_message_list = prepare_model_input(request.messages, self.window_message_count)
-        return await handler(request.override(messages = slim_message_list))
-
-
-##################################################
-# 모니터 요청 모델 (pydantic)
-##################################################
-class RegisterRequest(BaseModel):
-    user_id  : str
-    password : str
-
-
-class LoginRequest(BaseModel):
-    user_id  : str
-    password : str
-
-
-class RoomUpsertRequest(BaseModel):
-    user_id          : str
-    room_id          : str
-    thread_id        : str
-    title            : str            = "새 대화"
-    model            : Optional[str]  = None
-    reasoning_effort : Optional[str]  = None
-
-
-class CompressedInfoResponse(BaseModel):
-    # 대화 압축 결과. /stream 은 NDJSON 스트림이라 본문 JSON 이 없으므로
-    # {"type" : "compressed_info", ...} 이벤트로 첫 부분에 실려 나간다.
-    is_compressed : bool
-    saved_tokens  : int           = 0
-    summary       : Optional[str] = None
-
-
-class BookmarkUpsertRequest(BaseModel):
-    # 북마크 대상은 "방 안에서 몇 번째 답변인가"(agent_index) 로 식별한다.
-    # thread_id 는 대화 전체를 가리키는 값이라 답변 하나를 지목할 수 없어 쓰지 않는다.
-    bookmark_id  : str
-    room_id      : str
-    agent_index  : int
-    text         : str            = ""     # 목록 미리보기용 스냅샷 (체크포인트를 열지 않고 사이드바를 그리기 위함)
-    completed_at : Optional[int]  = None   # 답변 완료 시각 (epoch ms)
-    memo         : Optional[str]  = None   # 사용자 메모. None 이면 "건드리지 않음" — 기존 메모를 지우지 않는다
-
-
-class BookmarkMemoUpdateRequest(BaseModel):
-    # 메모만 부분 수정한다 (PATCH). 빈 문자열이면 메모 삭제로 취급해 NULL 로 저장한다.
-    memo : Optional[str] = None
-
-
-class StreamRequest(BaseModel):
-    thread_id         : str
-    message           : str
-    model             : Optional[str] = None    # 요청별 모델 선택 (미지정 시 .env 기본 모델)
-    reasoning_effort  : Optional[str] = None    # 생각 강도 : low | medium | high | None(모델 기본)
-    include_reasoning : bool          = False   # True : NDJSON 이벤트 스트림({"type":"reasoning"|"token","text":...}) 으로 생각 과정을 함께 전송
-                                                # False : 답변 토큰만 평문 스트림 (기존 클라이언트 하위호환)
-    referenced_text   : Optional[str] = None    # 이전 답변에서 드래그해 "참조하기"로 담은 발췌.
-                                                # 있으면 [참조 내용]/[질문] 두 블록으로 조합해 모델에 전달한다.
-    preset_name       : Optional[str] = None    # LLM 파라미터 프리셋: LOW / MEDIUM / HIGH
-                                                # 지정 시 온도, top_p, max_tokens 등 하이퍼파라미터를 적용한다.
-    referenced_message_id_list : List[str] = Field(default_factory = list)
-                                                # 우클릭으로 통째로 고른 이전 답변들의 ID ("agent-0", "agent-3" …).
-                                                # 체크포인트에서 본문을 찾아 <referenced_context> 블록으로 묶어 전달한다.
-    image_url_list : List[str] = Field(default_factory = list)
-                                                # POST /api/upload 로 MinIO 에 올린 이미지들의 접근 URL.
-                                                # 있으면 질문을 OpenAI 멀티모달 규격(text + image_url 블록)으로 조립해 Vision 모델에 넘긴다.
-
-
-class TruncateThreadRequest(BaseModel):
-    # 유지할 사용자 메시지 개수. 그 다음 사용자 메시지부터 이후 전부를 체크포인트에서 제거한다.
-    # (특정 질문을 수정해 그 지점부터 대화를 다시 이어갈 때 사용)
-    #
-    # 개수 기준인 이유 : 실패/중단된 턴은 프론트 목록에는 남지만 체크포인트에는 기록되지 않아
-    # 양쪽 순번이 어긋난다. 개수 기준이면 어긋나도 "제거할 것 없음"으로 안전하게 끝난다.
-    keep_human_message_count : int
-
-
 class ServerApplication:
-    BOOKMARK_MEMO_MAXIMUM_LENGTH   = 1000   # 북마크 메모 최대 길이 (기본값 : 1000)
-    REFERENCED_TEXT_MAXIMUM_LENGTH = 2000   # 참조 발췌 최대 길이 (기본값 : 2000) — 프롬프트가 발췌로 뒤덮이는 것을 막는다
-    REFERENCED_MESSAGE_MAXIMUM_COUNT  = 10    # 통째로 참조할 수 있는 이전 답변 개수 (기본값 : 10)
-    REFERENCED_MESSAGE_MAXIMUM_LENGTH = 4000  # 참조 답변 1건당 최대 길이 (기본값 : 4000)
-    REFERENCED_MESSAGE_ID_PREFIX      = "agent-"   # 답변 ID 형식 : agent-{답변 순번(0부터)}
-    DUPLICATE_USER_MESSAGE            = "이미 등록된 유저입니다."   # 회원가입 중복 ID 안내 (409 응답 본문에 그대로 실린다)
 
     def __init__(self) -> None:
         load_dotenv()
@@ -398,8 +244,20 @@ class ServerApplication:
         self.checkpoint_connection_pool   = None  # psycopg AsyncConnectionPool (lifespan 에서 생성/종료)
         self.checkpoint_saver             = None  # AsyncPostgresSaver (lifespan 에서 생성, 모니터 그래프가 사용)
 
+        # 기능별 서비스 : DB 풀이 필요해 lifespan(_initialize_checkpointer_async)에서 조립된다
+        self.auth_service              = None
+        self.room_service              = None
+        self.bookmark_service          = None
+        self.thread_service            = None
+        self.debug_service             = None
+        self.image_upload_handler      = None
+        self.reference_context_builder = None
+        # 모델/프리셋 조회는 DB 를 쓰지 않아 지금 만들 수 있다
+        self.model_catalog_service     = None   # model_catalog 확정 후 아래에서 생성
+
         # 모니터 그래프 캐시 : (모델 키, 생각 강도) → 컴파일 그래프. 체크포인터를 공유하므로 스레드 이력은 설정과 무관하게 이어진다
         self.model_catalog                = ModelCatalog.load_default()   # config/models.yaml (없으면 None → .env 폴백)
+        self.model_catalog_service        = ModelCatalogService(self.model_catalog)
         self.compiled_graph_dictionary    = {}
         self.is_run_buffer_disabled       = False   # Redis 미가동 등으로 버퍼링 실패 시 True (스트리밍은 계속)
 
@@ -592,6 +450,22 @@ class ServerApplication:
         self.conversation_summary_repository = ConversationSummaryRepository(self.checkpoint_connection_pool)
         self.conversation_summarizer         = ConversationSummarizer(self.conversation_summary_repository, self.compression_configuration)
 
+        # 기능별 서비스 조립 : DB 풀을 쓰는 서비스들이라 풀이 열린 지금 시점에 만든다.
+        # (라우트는 __init__ 에서 이미 얇은 어댑터로 등록해 두었고, 어댑터가 이 서비스들을 호출한다)
+        self.auth_service     = AuthService(self.user_repository, self.checkpoint_connection_pool,
+                                            self.auth_token_secret, self.auth_token_ttl_second_count)
+        self.room_service     = RoomService(self.checkpoint_connection_pool, self.auth_service)
+        self.bookmark_service = BookmarkService(self.checkpoint_connection_pool, self.auth_service)
+        self.thread_service   = ThreadService(self.checkpoint_connection_pool, self.auth_service,
+                                              lambda : self._get_or_create_compiled_graph(None, None),
+                                              self.conversation_summary_repository)
+        self.debug_service    = DebugService(self.orchestrator_redis_client, self.auth_service,
+                                             os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.image_upload_handler   = ImageUploadHandler(self.image_upload_service, self.auth_service)
+        self.reference_context_builder = ReferenceContextBuilder(
+            lambda thread_id : self._get_or_create_compiled_graph(None, None)
+                                   .aget_state({"configurable" : {"thread_id" : thread_id}}))
+
         # 오케스트레이터 그래프 : 기존 동작 보존 — CHECKPOINT_ENABLED 일 때만 체크포인터가 주입된 그래프로 교체
         if self.is_checkpoint_enabled:
             self.orchestrator_compiled_graph            = self._create_orchestrator_compiled_graph(checkpointer = checkpoint_saver)
@@ -646,365 +520,73 @@ ALTER TABLE chat_bookmark ADD COLUMN IF NOT EXISTS memo TEXT;
 """)
 
     ##################################################
-    # 인증 라우트 핸들러 (사용자 등록 / 로그인)
-    ##################################################
-
-    def _issue_token(self, user_id : str) -> str:
-        return AuthTokenHelper.create_token(user_id, self.auth_token_secret, self.auth_token_ttl_second_count)
-
-    def _require_authenticated_user_id(self, authorization : Optional[str]) -> str:
-        # Authorization: Bearer <token> 를 검증하고 인증된 user_id 를 반환한다 (없거나 무효면 401)
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(status_code = 401, detail = "AUTHENTICATION REQUIRED")
-        token   = authorization[len("Bearer "):].strip()
-        user_id = AuthTokenHelper.verify_token(token, self.auth_token_secret)
-        if user_id is None:
-            raise HTTPException(status_code = 401, detail = "INVALID OR EXPIRED TOKEN")
-        return user_id
-
-    async def _assert_thread_accessible_async(self, user_id : str, thread_id : str) -> None:
-        # 스레드 소유권 검증 : 다른 사용자가 소유(chat_room)한 thread_id 면 403.
-        # 미등록(신규) 스레드나 본인 소유 스레드는 허용한다.
-        async with self.checkpoint_connection_pool.connection() as connection:
-            cursor = await connection.execute("SELECT 1 FROM chat_room WHERE thread_id = %s AND user_id <> %s LIMIT 1", (thread_id, user_id))
-            if await cursor.fetchone() is not None:
-                raise HTTPException(status_code = 403, detail = "THREAD ACCESS DENIED")
-
-    async def register_user_async(self, register_request : RegisterRequest) -> Dict[str, Any]:
-        # 신규 사용자 등록 : user_id 중복이면 409, 유효성 실패면 400. 성공 시 인증 토큰 발급
-        user_id  = register_request.user_id.strip()
-        password = register_request.password
-        if not user_id or not password:
-            raise HTTPException(status_code = 400, detail = "USER ID AND PASSWORD ARE REQUIRED")
-        if len(password) < 4:
-            raise HTTPException(status_code = 400, detail = "PASSWORD TOO SHORT : MINIMUM 4 CHARACTERS")
-        password_hash = PasswordHelper.hash_password(password)
-        is_created    = await self.user_repository.create_user_async(user_id, password_hash)
-        if not is_created:
-            # 화면에 그대로 띄우는 문구라 한국어로 내려준다 (다른 오류 메시지는 개발자용이라 영어를 유지).
-            # 응답에 user_id 를 되싣지 않는다 — 아무나 가입 API 를 두드려 계정 존재 여부를 확인할 수 있게 되기 때문.
-            raise HTTPException(status_code = 409, detail = ServerApplication.DUPLICATE_USER_MESSAGE)
-        return {"user_id" : user_id, "token" : self._issue_token(user_id), "status" : "registered"}
-
-    async def login_user_async(self, login_request : LoginRequest) -> Dict[str, Any]:
-        # 로그인 검증 : user_id 없음/비밀번호 불일치는 동일하게 401 (계정 존재 여부 노출 방지). 성공 시 인증 토큰 발급
-        user_id     = login_request.user_id.strip()
-        stored_hash = await self.user_repository.get_password_hash_async(user_id)
-        if stored_hash is None or not PasswordHelper.verify_password(login_request.password, stored_hash):
-            raise HTTPException(status_code = 401, detail = "INVALID USER ID OR PASSWORD")
-        return {"user_id" : user_id, "token" : self._issue_token(user_id), "status" : "ok"}
-
-    ##################################################
     # 모니터 라우트 핸들러
     ##################################################
 
+    ##################################################
+    # 라우트 어댑터
+    #
+    # 실제 로직은 각 서비스가 갖고 있고 여기서는 HTTP 시그니처만 붙여 넘긴다.
+    # FastAPI 는 등록된 함수의 시그니처를 읽어 의존성을 주입하므로(Header/File 기본값),
+    # 서비스 메서드를 그대로 등록하면 authorization 이 쿼리 파라미터로 잘못 해석된다.
+    ##################################################
+
+    async def register_user_async(self, register_request : RegisterRequest) -> Dict[str, Any]:
+        return await self.auth_service.register_user_async(register_request)
+
+    async def login_user_async(self, login_request : LoginRequest) -> Dict[str, Any]:
+        return await self.auth_service.login_user_async(login_request)
+
     async def list_models_async(self) -> Dict[str, Any]:
-        # 프론트 모델 선택 드롭다운용.
-        # 카탈로그 모드 : config/models.yaml 의 모델 키 목록을 그대로 노출한다 (요청의 model 값 = 카탈로그 키)
-        if self.model_catalog is not None:
-            return {"default_model" : self.model_catalog.get_default_model_key(), "models" : self.model_catalog.get_model_key_list(), "provider" : "catalog"}
-        # 폴백 모드 : ollama 는 설치 모델을 프록시, 그 외 프로바이더는 기본 모델만 노출한다
-        default_model  = os.getenv("MODEL_NAME", "qwen3-vl:4b")
-        model_provider = os.getenv("MODEL_PROVIDER", "ollama").strip().lower()
-        if model_provider != "ollama":
-            return {"default_model" : default_model, "models" : [default_model], "provider" : model_provider}
-        import httpx
-        ollama_base_url = os.getenv("MODEL_BASE_URL", "http://localhost:11434")
-        try:
-            async with httpx.AsyncClient(timeout = 5.0) as http_client:
-                response = await http_client.get(f"{ollama_base_url}/api/tags")
-                response.raise_for_status()
-                model_name_list = [model_entry["name"] for model_entry in response.json().get("models", [])]
-        except Exception as exception:
-            raise HTTPException(status_code = 502, detail = f"OLLAMA MODEL LIST FAILED : {exception}")
-        return {"default_model" : default_model, "models" : model_name_list, "provider" : model_provider}
+        return await self.model_catalog_service.list_models_async()
 
     async def list_model_presets_async(self) -> ModelPresetsResponse:
-        # LLM 모델 파라미터 프리셋 목록 반환 (LOW / MEDIUM / HIGH)
-        presets_dictionary = ModelPresetLoader.load_presets()
-        presets_object_dictionary = {}
-        for preset_name, preset_params in presets_dictionary.items():
-            # 부분 파라미터 세트 (thinking, answer) 변환
-            thinking_params = preset_params.get("thinking")
-            answer_params   = preset_params.get("answer")
-            thinking_object = ParameterSet(**thinking_params) if thinking_params else None
-            answer_object   = ParameterSet(**answer_params) if answer_params else None
-            # 메인 프리셋 객체 생성
-            preset_object = ModelPreset(
-                name                 = preset_name,
-                temperature          = preset_params.get("temperature", 0.5),
-                top_p                = preset_params.get("top_p", 0.9),
-                max_completion_tokens = preset_params.get("max_completion_tokens", 512),
-                timeout              = preset_params.get("timeout", 120),
-                max_retries          = preset_params.get("max_retries", 3),
-                stream_usage         = preset_params.get("stream_usage", True),
-                default_headers      = preset_params.get("default_headers", {}),
-                extra_body           = preset_params.get("extra_body", {}),
-                num_return_sequences = preset_params.get("num_return_sequences", 1),
-                thinking             = thinking_object,
-                answer               = answer_object
-            )
-            presets_object_dictionary[preset_name] = preset_object
-        return ModelPresetsResponse(presets = presets_object_dictionary, available_preset_names = list(presets_object_dictionary.keys()))
+        return await self.model_catalog_service.list_model_presets_async()
 
     async def upload_image_async(self, file : UploadFile = File(...), authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
-        # 이미지를 MinIO 에 올리고 Vision 모델이 읽을 수 있는 URL 을 돌려준다.
-        # 인증을 요구하는 이유 : 열어두면 누구나 사내 스토리지에 파일을 쌓을 수 있다.
-        self._require_authenticated_user_id(authorization)
-
-        if not self.image_upload_service.is_allowed_content_type(file.content_type):
-            raise HTTPException(status_code = 400, detail = "이미지 파일만 업로드할 수 있습니다. (png / jpeg / webp / gif)")
-
-        # 크기 검사는 파일을 통째로 읽어서 한다. UploadFile 은 스풀링되어 큰 파일은 디스크로 넘어가므로
-        # 메모리를 잡아먹지 않고, 헤더의 Content-Length 는 위조될 수 있어 믿지 않는다.
-        file_bytes = await file.read()
-        if len(file_bytes) == 0:
-            raise HTTPException(status_code = 400, detail = "빈 파일입니다.")
-        if len(file_bytes) > self.image_upload_service.maximum_byte_count:
-            maximum_megabyte = self.image_upload_service.maximum_byte_count / (1024 * 1024)
-            raise HTTPException(status_code = 413, detail = f"이미지가 너무 큽니다. (최대 {maximum_megabyte:.0f}MB)")
-
-        object_key    = self.image_upload_service.build_object_key(file.content_type)
-        is_uploaded   = await asyncio.to_thread(
-            self.image_upload_service.upload_image, io.BytesIO(file_bytes), object_key, file.content_type)
-        if not is_uploaded:
-            raise HTTPException(status_code = 502, detail = "이미지 저장소에 업로드하지 못했습니다. 스토리지 상태를 확인해주세요.")
-
-        image_url = await asyncio.to_thread(self.image_upload_service.build_image_url, object_key)
-        if not image_url:
-            raise HTTPException(status_code = 502, detail = "이미지 접근 URL 을 만들지 못했습니다.")
-        return {"object_key" : object_key, "image_url" : image_url, "content_type" : file.content_type, "byte_count" : len(file_bytes)}
+        return await self.image_upload_handler.upload_image_async(file, authorization)
 
     async def list_rooms_async(self, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
-        # 인증된 사용자의 방 목록만 반환한다 (스코핑 키는 요청값이 아니라 토큰의 user_id)
-        user_id = self._require_authenticated_user_id(authorization)
-        async with self.checkpoint_connection_pool.connection() as connection:
-            cursor = await connection.execute(
-                "SELECT room_id, thread_id, title, model, reasoning_effort FROM chat_room WHERE user_id = %s ORDER BY updated_at DESC", (user_id,))
-            room_row_list = await cursor.fetchall()
-        return {"rooms" : [dict(room_row) for room_row in room_row_list]}
+        return await self.room_service.list_rooms_async(authorization)
 
     async def upsert_room_async(self, room_request : RoomUpsertRequest, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
-        # 방 생성/갱신 : 소유자는 토큰의 user_id 로 강제한다 (요청 본문의 user_id 는 무시). 남의 방(room_id) 갈취 방지
-        user_id = self._require_authenticated_user_id(authorization)
-        await self._assert_thread_accessible_async(user_id, room_request.thread_id)
-        async with self.checkpoint_connection_pool.connection() as connection:
-            cursor = await connection.execute(
-                "INSERT INTO chat_room (room_id, user_id, thread_id, title, model, reasoning_effort) VALUES (%s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (room_id) DO UPDATE SET thread_id = EXCLUDED.thread_id, title = EXCLUDED.title, model = EXCLUDED.model, "
-                "reasoning_effort = EXCLUDED.reasoning_effort, updated_at = NOW() "
-                "WHERE chat_room.user_id = EXCLUDED.user_id",
-                (room_request.room_id, user_id, room_request.thread_id, room_request.title, room_request.model, room_request.reasoning_effort))
-            if cursor.rowcount == 0:
-                raise HTTPException(status_code = 403, detail = "ROOM ACCESS DENIED")
-        return {"status" : "ok"}
+        return await self.room_service.upsert_room_async(room_request, authorization)
 
     async def delete_room_async(self, room_id : str, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
-        # 목록에서만 제거한다 (체크포인트 대화 원본은 retention 배치가 유휴 기준으로 정리). 본인 소유 방만 삭제 가능
-        user_id = self._require_authenticated_user_id(authorization)
-        async with self.checkpoint_connection_pool.connection() as connection:
-            cursor = await connection.execute("DELETE FROM chat_room WHERE room_id = %s AND user_id = %s", (room_id, user_id))
-            if cursor.rowcount == 0:
-                raise HTTPException(status_code = 404, detail = f"ROOM NOT FOUND : {room_id}")
-        return {"status" : "deleted"}
-
-    ##################################################
-    # 북마크 (답변 단위 · chat_bookmark 테이블)
-    ##################################################
+        return await self.room_service.delete_room_async(room_id, authorization)
 
     async def list_bookmarks_async(self, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
-        # 인증된 사용자의 북마크만 최신순으로 반환한다 (스코핑 키는 요청값이 아니라 토큰의 user_id)
-        user_id = self._require_authenticated_user_id(authorization)
-        async with self.checkpoint_connection_pool.connection() as connection:
-            cursor = await connection.execute(
-                "SELECT bookmark_id, room_id, agent_index, text, memo, "
-                "       (EXTRACT(EPOCH FROM completed_at) * 1000)::BIGINT AS completed_at, "
-                "       (EXTRACT(EPOCH FROM created_at)   * 1000)::BIGINT AS created_at "
-                "FROM chat_bookmark WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
-            bookmark_row_list = await cursor.fetchall()
-        return {"bookmarks" : [dict(bookmark_row) for bookmark_row in bookmark_row_list]}
-
-    @staticmethod
-    def _normalize_bookmark_memo(memo : Optional[str]) -> Optional[str]:
-        # 메모 정규화 : 앞뒤 공백 제거 후 빈 문자열은 NULL(메모 없음)로, 그 외는 최대 길이로 자른다
-        if memo is None:
-            return None
-        trimmed_memo = memo.strip()
-        if not trimmed_memo:
-            return None
-        return trimmed_memo[:ServerApplication.BOOKMARK_MEMO_MAXIMUM_LENGTH]
+        return await self.bookmark_service.list_bookmarks_async(authorization)
 
     async def upsert_bookmark_async(self, bookmark_request : BookmarkUpsertRequest, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
-        # 북마크 추가 : 소유자는 토큰의 user_id 로 강제한다. 남의 방에는 북마크할 수 없다.
-        user_id = self._require_authenticated_user_id(authorization)
-        if bookmark_request.agent_index < 0:
-            raise HTTPException(status_code = 400, detail = "INVALID AGENT INDEX")
-        completed_at_second = (bookmark_request.completed_at / 1000) if bookmark_request.completed_at else None
-        memo_text           = ServerApplication._normalize_bookmark_memo(bookmark_request.memo)
-        async with self.checkpoint_connection_pool.connection() as connection:
-            # 방 소유권 확인 : 본인 소유가 아니면(또는 없는 방이면) INSERT 대상 자체가 없다
-            cursor = await connection.execute("SELECT 1 FROM chat_room WHERE room_id = %s AND user_id = %s", (bookmark_request.room_id, user_id))
-            if await cursor.fetchone() is None:
-                raise HTTPException(status_code = 403, detail = "ROOM ACCESS DENIED")
-            # 같은 답변을 다시 북마크하면 미리보기 스냅샷만 갱신한다 (중복 행을 만들지 않는다)
-            # 메모는 COALESCE 로 보존한다 — 캐시 재등록처럼 메모를 싣지 않은 요청이 기존 메모를 지우면 안 된다
-            await connection.execute(
-                "INSERT INTO chat_bookmark (bookmark_id, user_id, room_id, agent_index, text, completed_at, memo) "
-                "VALUES (%s, %s, %s, %s, %s, TO_TIMESTAMP(%s), %s) "
-                "ON CONFLICT (room_id, agent_index) DO UPDATE SET bookmark_id = EXCLUDED.bookmark_id, text = EXCLUDED.text, "
-                "completed_at = EXCLUDED.completed_at, memo = COALESCE(EXCLUDED.memo, chat_bookmark.memo)",
-                (bookmark_request.bookmark_id, user_id, bookmark_request.room_id, bookmark_request.agent_index,
-                 bookmark_request.text[:500], completed_at_second, memo_text))
-        return {"status" : "ok"}
+        return await self.bookmark_service.upsert_bookmark_async(bookmark_request, authorization)
 
     async def update_bookmark_memo_async(self, bookmark_id : str, memo_request : BookmarkMemoUpdateRequest,
                                          authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
-        # 메모 수정 : 본인 소유 북마크만 수정 가능. 빈 문자열/누락이면 메모를 지운다(NULL).
-        user_id   = self._require_authenticated_user_id(authorization)
-        memo_text = ServerApplication._normalize_bookmark_memo(memo_request.memo)
-        async with self.checkpoint_connection_pool.connection() as connection:
-            cursor = await connection.execute(
-                "UPDATE chat_bookmark SET memo = %s WHERE bookmark_id = %s AND user_id = %s", (memo_text, bookmark_id, user_id))
-            if cursor.rowcount == 0:
-                raise HTTPException(status_code = 404, detail = f"BOOKMARK NOT FOUND : {bookmark_id}")
-        return {"status" : "ok", "bookmark_id" : bookmark_id, "memo" : memo_text}
+        return await self.bookmark_service.update_bookmark_memo_async(bookmark_id, memo_request, authorization)
 
     async def delete_bookmark_async(self, bookmark_id : str, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
-        # 본인 소유 북마크만 삭제 가능. 이미 없으면 404 대신 성공으로 처리한다 (토글 연타/낙관적 UI 재시도 대비)
-        user_id = self._require_authenticated_user_id(authorization)
-        async with self.checkpoint_connection_pool.connection() as connection:
-            await connection.execute("DELETE FROM chat_bookmark WHERE bookmark_id = %s AND user_id = %s", (bookmark_id, user_id))
-        return {"status" : "deleted"}
-
-    async def get_api_client_page_async(self) -> FileResponse:
-        # 새 창(/dev/api-client)으로 여는 API 테스트 페이지 : 백엔드가 직접 서빙하므로 origin = API 베이스 (CORS 불필요)
-        frontend_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "public", "legacy", "api_client.html")
-        if not os.path.isfile(frontend_file_path):
-            raise HTTPException(status_code = 404, detail = f"API CLIENT PAGE NOT FOUND : {frontend_file_path}")
-        return FileResponse(frontend_file_path, media_type = "text/html")
-
-    async def get_redis_snapshot_async(self, thread_id : str, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
-        # 디버그 패널용 : 해당 스레드와 관련된 Redis 키를 실시간 스냅샷으로 반환한다
-        # (런 청크 버퍼 키 형식 : orch:{thread_id}:run:{run_id}:chunk_list)
-        user_id = self._require_authenticated_user_id(authorization)
-        await self._assert_thread_accessible_async(user_id, thread_id)
-        redis_client = self.orchestrator_redis_client
-        def try_parse_json(raw_value):
-            text = _to_text(raw_value)
-            try:
-                return json.loads(text)
-            except Exception:
-                return text
-        try:
-            matched_key_list = []
-            async for key_value in redis_client.scan_iter(match = f"*{thread_id}*", count = 200):
-                matched_key_list.append(_to_text(key_value))
-                if len(matched_key_list) >= 50:   # 디버그 표시용 상한
-                    break
-            key_snapshot_list = []
-            for key_name in sorted(matched_key_list):
-                key_type = _to_text(await redis_client.type(key_name))
-                ttl_second_count = await redis_client.ttl(key_name)
-                if key_type == "list":
-                    total_length = await redis_client.llen(key_name)
-                    value = [try_parse_json(item) for item in await redis_client.lrange(key_name, -30, -1)]   # 최근 30개만
-                elif key_type == "hash":
-                    total_length = await redis_client.hlen(key_name)
-                    value = {_to_text(field) : try_parse_json(item) for field, item in (await redis_client.hgetall(key_name)).items()}
-                elif key_type == "string":
-                    total_length = 1
-                    value = try_parse_json(await redis_client.get(key_name))
-                else:
-                    total_length = None
-                    value = f"(미지원 타입 : {key_type})"
-                key_snapshot_list.append({"key" : key_name, "type" : key_type, "ttl_second" : ttl_second_count, "length" : total_length, "value" : value})
-            return {"thread_id" : thread_id, "matched_key_count" : len(matched_key_list), "keys" : key_snapshot_list}
-        except Exception as exception:
-            raise HTTPException(status_code = 502, detail = f"REDIS SNAPSHOT FAILED : {exception}")
-
-    async def truncate_thread_async(self, thread_id : str, truncate_request : TruncateThreadRequest, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
-        # 특정 사용자 질문(0-based 순번)부터 이후 메시지를 체크포인트에서 제거한다.
-        # RemoveMessage 를 add_messages 리듀서에 흘려보내 해당 메시지들을 상태에서 지운다.
-        user_id = self._require_authenticated_user_id(authorization)
-        await self._assert_thread_accessible_async(user_id, thread_id)
-        if truncate_request.keep_human_message_count < 0:
-            raise HTTPException(status_code = 400, detail = "INVALID KEEP HUMAN MESSAGE COUNT")
-        runnable_configuration = {"configurable" : {"thread_id" : thread_id}}
-        compiled_graph         = self._get_or_create_compiled_graph(None, None)
-        state_snapshot         = await compiled_graph.aget_state(runnable_configuration)
-        message_list           = state_snapshot.values.get("messages", []) if state_snapshot else []
-
-        human_message_seen_count = 0
-        cut_index                = None
-        for message_index, message in enumerate(message_list):
-            if isinstance(message, HumanMessage):
-                if human_message_seen_count == truncate_request.keep_human_message_count:
-                    cut_index = message_index
-                    break
-                human_message_seen_count += 1
-        if cut_index is None:
-            # 체크포인트에 그만큼의 사용자 메시지가 없다 (실패/중단 턴으로 프론트와 어긋난 경우) → 제거할 것 없음
-            print(f"THREAD TRUNCATE SKIPPED : THREAD {thread_id} - KEEP {truncate_request.keep_human_message_count} - HUMAN {human_message_seen_count}", flush = True)
-            return {"thread_id" : thread_id, "kept_count" : len(message_list), "removed_count" : 0}
-
-        removal_message_list = [RemoveMessage(id = message.id) for message in message_list[cut_index:] if getattr(message, "id", None) is not None]
-        if removal_message_list:
-            await compiled_graph.aupdate_state(runnable_configuration, {"messages" : removal_message_list})
-
-        # 잘려나간 답변들의 북마크를 정리한다. agent_index 는 위치 기반이라 절단 후 남겨두면 엉뚱한 답변을 가리키게 된다.
-        # 남길 개수는 get_thread_messages_async 의 표시 규칙과 동일하게 센다 (본문 없는 도구 호출 AI 메시지는 제외).
-        kept_agent_message_count = sum(
-            1 for message in message_list[:cut_index]
-            if type(message).__name__ in ("AIMessage", "AIMessageChunk") and _extract_message_texts(message)[0])
-        async with self.checkpoint_connection_pool.connection() as connection:
-            await connection.execute(
-                "DELETE FROM chat_bookmark WHERE agent_index >= %s AND room_id IN "
-                "(SELECT room_id FROM chat_room WHERE thread_id = %s AND user_id = %s)",
-                (kept_agent_message_count, thread_id, user_id))
-
-        # 요약도 초기화한다 — 잘려나간 대화를 요약이 계속 가리키면 모델이 삭제된 내용을 기억한 것처럼 답한다.
-        # (다음 턴에 남은 히스토리로 다시 요약이 만들어진다)
-        if self.conversation_summary_repository is not None:
-            await self.conversation_summary_repository.clear_summary_async(thread_id)
-        print(f"THREAD TRUNCATED : THREAD {thread_id} - KEPT {cut_index} - REMOVED {len(removal_message_list)}", flush = True)
-        return {"thread_id" : thread_id, "kept_count" : cut_index, "removed_count" : len(removal_message_list)}
+        return await self.bookmark_service.delete_bookmark_async(bookmark_id, authorization)
 
     async def get_thread_messages_async(self, thread_id : str, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
-        # 대화 내용 복원 : LangGraph 체크포인트(messages 채널)를 표시용 [{role, text, reasoning}] 으로 변환한다
-        user_id = self._require_authenticated_user_id(authorization)
-        await self._assert_thread_accessible_async(user_id, thread_id)
-        state_snapshot = await self._get_or_create_compiled_graph(None, None).aget_state({"configurable" : {"thread_id" : thread_id}})
-        message_list   = state_snapshot.values.get("messages", []) if state_snapshot else []
-        display_message_list = []
-        for message in message_list:
-            message_type = type(message).__name__
-            body_text, reasoning_text = _extract_message_texts(message)
-            if message_type == "HumanMessage" and body_text:
-                display_message_list.append({"role" : "user", "text" : body_text})
-            elif message_type in ("AIMessage", "AIMessageChunk") and body_text:   # 도구 호출 전용(본문 없는) AI 메시지는 표시에서 제외
-                display_message_list.append({"role" : "agent", "text" : body_text, "reasoning" : reasoning_text or None})
-        return {"thread_id" : thread_id, "messages" : display_message_list}
+        return await self.thread_service.get_thread_messages_async(thread_id, authorization)
+
+    async def truncate_thread_async(self, thread_id : str, truncate_request : TruncateThreadRequest,
+                                    authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
+        return await self.thread_service.truncate_thread_async(thread_id, truncate_request, authorization)
 
     async def diagnose_thread_async(self, thread_id : str, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
-        # ① 순수 체크포인트 로드 시간 : aget_state 전후를 perf_counter 로 측정한다
-        user_id = self._require_authenticated_user_id(authorization)
-        await self._assert_thread_accessible_async(user_id, thread_id)
-        runnable_configuration = {"configurable" : {"thread_id" : thread_id}}
-        load_started_at        = time.perf_counter()
-        state_snapshot         = await self._get_or_create_compiled_graph(None, None).aget_state(runnable_configuration)
-        load_time_ms           = (time.perf_counter() - load_started_at) * 1000
+        return await self.thread_service.diagnose_thread_async(thread_id, authorization)
 
-        message_list : List[BaseMessage] = state_snapshot.values.get("messages", []) if state_snapshot else []
-        if not message_list and (state_snapshot is None or not state_snapshot.values):
-            raise HTTPException(status_code = 404, detail = f"NO CHECKPOINT STATE : {thread_id}")
+    async def get_redis_snapshot_async(self, thread_id : str, authorization : Optional[str] = Header(None)) -> Dict[str, Any]:
+        return await self.debug_service.get_redis_snapshot_async(thread_id, authorization)
 
-        # ② 메시지 수  ③ 생각 토큰 총 바이트(KB) — 인라인 <think> + reasoning_content 합산
-        think_total_byte_count = sum(_extract_think_byte_count(message) for message in message_list)
-        return {
-            "load_time_ms"  : round(load_time_ms, 1),
-            "message_count" : len(message_list),
-            "think_tag_kb"  : round(think_total_byte_count / 1024, 1)
-        }
+    async def get_api_client_page_async(self) -> FileResponse:
+        return await self.debug_service.get_api_client_page_async()
+
+    ##################################################
+    # 스트리밍 (모니터 채팅)
+    ##################################################
 
     @staticmethod
     def _summarize_stream_error(exception : Exception) -> str:
@@ -1054,103 +636,20 @@ ALTER TABLE chat_bookmark ADD COLUMN IF NOT EXISTS memo TEXT;
             print(f"CONTEXT COMPRESSION SKIPPED : THREAD {thread_id} - {exception}", flush = True)
             return CompressionResult.create_uncompressed()
 
-    @staticmethod
-    def _parse_referenced_agent_index(referenced_message_id : str) -> Optional[int]:
-        # "agent-3" → 3. 형식이 어긋나면 None 을 돌려주고 호출부가 조용히 건너뛴다.
-        if not isinstance(referenced_message_id, str):
-            return None
-        if not referenced_message_id.startswith(ServerApplication.REFERENCED_MESSAGE_ID_PREFIX):
-            return None
-        index_text = referenced_message_id[len(ServerApplication.REFERENCED_MESSAGE_ID_PREFIX):]
-        if not index_text.isdigit():
-            return None
-        return int(index_text)
-
-    async def _collect_referenced_message_list_async(self, thread_id : str, referenced_message_id_list : List[str]) -> List[Dict[str, Any]]:
-        # 요청받은 답변 ID 들을 체크포인트 본문으로 바꿔 돌려준다.
-        #
-        # 유효하지 않은 ID(형식 오류·이미 사라진 순번)는 예외를 던지지 않고 건너뛴다.
-        # 질문 수정으로 대화가 잘리거나 다른 기기에서 방을 지우면 프론트가 들고 있던 순번이 실제로 없어질 수 있는데,
-        # 그때 질문 전체를 실패시키면 사용자는 이유를 알 수 없는 오류만 보게 된다.
-        requested_index_list = []
-        for referenced_message_id in referenced_message_id_list[:ServerApplication.REFERENCED_MESSAGE_MAXIMUM_COUNT]:
-            agent_index = ServerApplication._parse_referenced_agent_index(referenced_message_id)
-            if agent_index is None or agent_index in requested_index_list:
-                continue
-            requested_index_list.append(agent_index)
-        if not requested_index_list:
-            return []
-
-        try:
-            state_snapshot = await self._get_or_create_compiled_graph(None, None).aget_state({"configurable" : {"thread_id" : thread_id}})
-        except Exception as exception:
-            # 체크포인트를 못 읽어도 질문 자체는 진행시킨다 (참조만 빠진다)
-            print(f"REFERENCED MESSAGE LOOKUP FAILED : THREAD {thread_id} - {exception}", flush = True)
-            return []
-
-        # 표시용 순번과 같은 규칙으로 답변만 추린다 (get_thread_messages_async 와 동일 : 본문 없는 도구 호출 메시지는 제외)
-        agent_text_list = []
-        for message in (state_snapshot.values.get("messages", []) if state_snapshot else []):
-            if type(message).__name__ not in ("AIMessage", "AIMessageChunk"):
-                continue
-            body_text, _reasoning_text = _extract_message_texts(message)
-            if body_text:
-                agent_text_list.append(body_text)
-
-        # 사용자가 고른 순서가 아니라 대화 순서대로 넣는다 — 모델이 시간 흐름대로 읽는 편이 자연스럽다
-        referenced_message_list = []
-        for agent_index in sorted(requested_index_list):
-            if agent_index >= len(agent_text_list):
-                continue
-            referenced_message_list.append({
-                "agent_index" : agent_index,
-                "text"        : agent_text_list[agent_index][:ServerApplication.REFERENCED_MESSAGE_MAXIMUM_LENGTH]
-            })
-        return referenced_message_list
-
-    @staticmethod
-    def _build_referenced_context_block(referenced_message_list : List[Dict[str, Any]]) -> str:
-        # 통째로 고른 답변들을 <referenced_context> 태그로 묶는다.
-        # 태그로 감싸는 이유 : 질문 본문과 참조 자료의 경계를 모델이 확실히 구분하게 하려는 것이다.
-        if not referenced_message_list:
-            return ""
-        block_line_list = ["<referenced_context>"]
-        for referenced_message in referenced_message_list:
-            block_line_list.append(f"[답변 #{referenced_message['agent_index'] + 1}]")
-            block_line_list.append(referenced_message["text"])
-        block_line_list.append("</referenced_context>")
-        return "\n".join(block_line_list)
-
-    @staticmethod
-    def _build_referenced_message_text(message : str, referenced_text : Optional[str], referenced_context_block : str = "") -> str:
-        # 참조가 있으면 <referenced_context>(답변 통째로) → [참조 내용](드래그 발췌) → [질문] 순으로 조합한다.
-        # 조합 결과를 그대로 HumanMessage 로 저장하는 이유 : 다음 턴에도 체크포인트에서 참조 맥락이 함께 복원되어야
-        # "아까 그거"처럼 발췌를 가리키는 후속 질문이 이어진다.
-        trimmed_reference = (referenced_text or "").strip()
-        if not trimmed_reference and not referenced_context_block:
-            return message
-
-        composed_section_list = []
-        if referenced_context_block:
-            composed_section_list.append(referenced_context_block)
-        if trimmed_reference:
-            composed_section_list.append(f"[참조 내용]: {trimmed_reference[:ServerApplication.REFERENCED_TEXT_MAXIMUM_LENGTH]}")
-        composed_section_list.append(f"[질문]: {message}")
-        return "\n".join(composed_section_list)
-
     async def stream_async(self, stream_request : StreamRequest, authorization : Optional[str] = Header(None)) -> StreamingResponse:
         # 인증 + 스레드 소유권 검증 : 남의 스레드로 스트리밍(대화 이어쓰기) 방지
-        user_id = self._require_authenticated_user_id(authorization)
-        await self._assert_thread_accessible_async(user_id, stream_request.thread_id)
+        user_id = self.auth_service.require_authenticated_user_id(authorization)
+        await self.auth_service.assert_thread_accessible_async(user_id, stream_request.thread_id)
         # 이번 턴(그래프 1회 실행)을 식별하는 run_id 를 발급한다.
         # 오케스트레이터(GraphStreamExecutor)와 동일하게 configurable.run_id 로 그래프에 전달하고,
         # 청크를 orch:{thread_id}:run:{run_id}:chunk_list 버퍼에 누적해 디버그 패널에서 추적할 수 있게 한다.
         run_id                 = str(uuid.uuid4())
         runnable_configuration = {"configurable" : {"thread_id" : stream_request.thread_id, "run_id" : run_id}}
         # 우클릭으로 고른 이전 답변들을 체크포인트에서 찾아 <referenced_context> 로 묶는다 (없는 ID 는 조용히 빠진다)
-        referenced_message_list  = await self._collect_referenced_message_list_async(stream_request.thread_id, stream_request.referenced_message_id_list)
-        referenced_context_block = ServerApplication._build_referenced_context_block(referenced_message_list)
-        composed_message_text    = ServerApplication._build_referenced_message_text(
+        referenced_message_list  = await self.reference_context_builder.collect_referenced_message_list_async(
+            stream_request.thread_id, stream_request.referenced_message_id_list)
+        referenced_context_block = ReferenceContextBuilder.build_context_block(referenced_message_list)
+        composed_message_text    = ReferenceContextBuilder.build_message_text(
             stream_request.message, stream_request.referenced_text, referenced_context_block)
         # 이미지가 붙어 있으면 멀티모달 content 블록으로, 없으면 지금까지처럼 문자열 그대로 넘긴다.
         # (인라인 모드에서는 스토리지에서 이미지를 내려받으므로 블로킹 I/O 를 스레드로 뺀다)
