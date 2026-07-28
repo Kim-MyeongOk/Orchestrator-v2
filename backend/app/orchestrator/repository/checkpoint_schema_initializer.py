@@ -111,15 +111,32 @@ CREATE INDEX IF NOT EXISTS checkpoint_writes_thread_id_idx ON checkpoint_writes 
             await connection.execute("INSERT INTO checkpoint_migrations (v) VALUES ($1) ON CONFLICT (v) DO NOTHING", migration_version)
             print(f"CHECKPOINT MIGRATION APPLIED : VERSION {migration_version}", flush = True)
 
+    # 체크포인터가 실제로 쓰는 세 테이블. 하나라도 없으면 스트리밍이 UndefinedTable 로 통째로 실패한다.
+    REQUIRED_TABLE_NAME_TUPLE = ("checkpoints", "checkpoint_blobs", "checkpoint_writes")
+
     async def initialize_schema_async(self) -> bool:
         # 반환값 : 이번 호출에서 파티션 스키마를 새로 생성했으면 True
         async with self.postgresql_pool_manager.get_pool().acquire() as connection:
-            # 이미 checkpoints 테이블이 존재하면 스키마는 손대지 않되, 패키지 업그레이드로 추가된
-            # 신규 마이그레이션만 파티션 안전형으로 이어서 적용한다 (미적용 상태로 두면 setup() 이 크래시)
-            existing_table_kind = await connection.fetchval("SELECT relkind FROM pg_class WHERE relname = 'checkpoints' AND relnamespace = 'public'::regnamespace")
-            if existing_table_kind is not None:
+            # 세 테이블이 모두 있어야 "스키마 완비"로 본다.
+            # checkpoints 하나만 확인하면, 나머지 둘이 지워진 상태에서도 완비로 오판해 그대로 통과한다.
+            # 그러면 checkpoint_migrations 에 버전이 차 있어 마이그레이션도 건너뛰므로 영원히 복구되지 않고,
+            # 매 요청이 "checkpoint_blobs 릴레이션이 없습니다" 로 실패한다.
+            existing_table_name_row_list = await connection.fetch(
+                "SELECT relname FROM pg_class WHERE relname = ANY($1::text[]) AND relnamespace = 'public'::regnamespace",
+                list(CheckpointSchemaInitializer.REQUIRED_TABLE_NAME_TUPLE))
+            existing_table_name_set = {row["relname"] for row in existing_table_name_row_list}
+            missing_table_name_list = [table_name for table_name in CheckpointSchemaInitializer.REQUIRED_TABLE_NAME_TUPLE
+                                       if table_name not in existing_table_name_set]
+
+            if not missing_table_name_list:
+                # 스키마는 손대지 않되, 패키지 업그레이드로 추가된 신규 마이그레이션만 파티션 안전형으로 이어서 적용한다
+                # (미적용 상태로 두면 setup() 이 CONCURRENTLY 로 크래시한다)
                 await CheckpointSchemaInitializer._apply_missing_migrations_async(connection)
                 return False
+
+            if existing_table_name_set:
+                # 일부만 남은 상태 : DDL 은 전부 IF NOT EXISTS 라 남아 있는 테이블은 건드리지 않고 빠진 것만 채운다
+                print(f"CHECKPOINT SCHEMA INCOMPLETE : MISSING {missing_table_name_list} - RECREATING", flush = True)
             async with connection.transaction():
                 partition_ddl_text = CheckpointSchemaInitializer._create_partition_ddl_text(self.partition_count)
                 await connection.execute(CheckpointSchemaInitializer.PARTITIONED_SCHEMA_DDL_TEMPLATE.format(partition_ddl_text = partition_ddl_text))
