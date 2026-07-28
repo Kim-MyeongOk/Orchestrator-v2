@@ -11,8 +11,9 @@ from typing import Optional
 
 from fastapi import HTTPException
 
-from app.monitor.api.room_upsert_request import RoomUpsertRequest
-from app.monitor.service.auth_service    import AuthService
+from app.database.table_query.chat_room_query import ChatRoomQuery
+from app.monitor.api.room_upsert_request      import RoomUpsertRequest
+from app.monitor.service.auth_service         import AuthService
 
 
 class RoomService:
@@ -24,9 +25,7 @@ class RoomService:
         # 인증된 사용자의 방 목록만 반환한다 (스코핑 키는 요청값이 아니라 토큰의 user_id)
         user_id = self.auth_service.require_authenticated_user_id(authorization)
         async with self.checkpoint_connection_pool.connection() as connection:
-            cursor = await connection.execute(
-                "SELECT room_id, thread_id, title, model, reasoning_effort FROM chat_room "
-                "WHERE user_id = %s ORDER BY updated_at DESC", (user_id,))
+            cursor = await connection.execute(ChatRoomQuery.SELECT_LIST_BY_USER, (user_id,))
             room_row_list = await cursor.fetchall()
         return {"rooms" : [dict(room_row) for room_row in room_row_list]}
 
@@ -36,10 +35,7 @@ class RoomService:
         await self.auth_service.assert_thread_accessible_async(user_id, room_request.thread_id)
         async with self.checkpoint_connection_pool.connection() as connection:
             cursor = await connection.execute(
-                "INSERT INTO chat_room (room_id, user_id, thread_id, title, model, reasoning_effort) VALUES (%s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (room_id) DO UPDATE SET thread_id = EXCLUDED.thread_id, title = EXCLUDED.title, model = EXCLUDED.model, "
-                "reasoning_effort = EXCLUDED.reasoning_effort, updated_at = NOW() "
-                "WHERE chat_room.user_id = EXCLUDED.user_id",
+                ChatRoomQuery.UPSERT,
                 (room_request.room_id, user_id, room_request.thread_id, room_request.title,
                  room_request.model, room_request.reasoning_effort))
             if cursor.rowcount == 0:
@@ -50,8 +46,7 @@ class RoomService:
         # 목록에서만 제거한다 (체크포인트 대화 원본은 retention 배치가 유휴 기준으로 정리). 본인 소유 방만 삭제 가능
         user_id = self.auth_service.require_authenticated_user_id(authorization)
         async with self.checkpoint_connection_pool.connection() as connection:
-            cursor = await connection.execute(
-                "DELETE FROM chat_room WHERE room_id = %s AND user_id = %s", (room_id, user_id))
+            cursor = await connection.execute(ChatRoomQuery.DELETE_BY_OWNER, (room_id, user_id))
             if cursor.rowcount == 0:
                 raise HTTPException(status_code = 404, detail = f"ROOM NOT FOUND : {room_id}")
         return {"status" : "deleted"}

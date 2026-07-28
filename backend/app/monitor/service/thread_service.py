@@ -19,6 +19,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import RemoveMessage
 
+from app.database.table_query.chat_bookmark_query import ChatBookmarkQuery
 from app.llm.agent.think_token_helper           import ThinkTokenHelper
 from app.monitor.api.truncate_thread_request    import TruncateThreadRequest
 from app.monitor.service.auth_service           import AuthService
@@ -103,9 +104,7 @@ class ThreadService:
             and ThinkTokenHelper.extract_message_texts(message)[0])
         async with self.checkpoint_connection_pool.connection() as connection:
             await connection.execute(
-                "DELETE FROM chat_bookmark WHERE agent_index >= %s AND room_id IN "
-                "(SELECT room_id FROM chat_room WHERE thread_id = %s AND user_id = %s)",
-                (kept_agent_message_count, thread_id, user_id))
+                ChatBookmarkQuery.DELETE_FROM_AGENT_INDEX, (kept_agent_message_count, thread_id, user_id))
 
         # 요약도 초기화한다 — 잘려나간 대화를 요약이 계속 가리키면 모델이 삭제된 내용을 기억한 것처럼 답한다.
         # (다음 턴에 남은 히스토리로 다시 요약이 만들어진다)
