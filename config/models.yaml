@@ -32,6 +32,12 @@ model_info :
         extra_body                :
         reasoning_enabled         : true
 
+    # ⚠️ 이 모델은 Ollama 0.24.x 에서만 돈다. 신엔진(0.30.0+)이 mllama 아키텍처를 버려
+    #    0.30 이상에서는 "unknown model architecture: 'mllama'" 로 로드 자체가 실패한다.
+    #    (0.30.0 릴리스 노트 : "llama3.2-vision is not yet supported")
+    #    Ollama 를 올리면 이 모델이 죽으므로 자동 업데이트를 꺼 둔 상태다.
+    #    capabilities 가 completion/vision 뿐이라 thinking·도구 호출을 모두 지원하지 않는다
+    #    → reasoning_enabled / tool_calling_enabled 를 반드시 false 로 둔다.
     llama3_2_vision :
         provider                  : ollama
         name                      : llama3.2-vision
@@ -46,6 +52,7 @@ model_info :
         default_header_dictionary :
             Authorization : "Bearer ${oc.env:OLLAMA_API_KEY,null}"
         reasoning_enabled         : false
+        tool_calling_enabled      : false
 
     gpt_oss_120b :
         provider                  : ollama

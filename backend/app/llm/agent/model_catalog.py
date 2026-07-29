@@ -50,7 +50,8 @@ class ModelCatalog:
             extra_body_dictionary     = model_entry.get("extra_body") or model_entry.get("extra_body_dictionary"),
             reasoning_enabled         = model_entry.get("reasoning_enabled"),
             context_token_count       = int(model_entry["context_token_count"])    if model_entry.get("context_token_count")  is not None else None,
-            reasoning_effort          = reasoning_effort
+            reasoning_effort          = reasoning_effort,
+            tool_calling_enabled      = model_entry.get("tool_calling_enabled", True) is not False   # 명시적으로 false 일 때만 미지원 (하위 호환)
         )
 
     def is_model_enabled(self, model_key : str) -> bool:

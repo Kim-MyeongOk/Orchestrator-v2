@@ -69,6 +69,15 @@ class ChatModelFactory:
         if provider == "ollama":
             # reasoning : 생각 강도(low/medium/high, 모델이 지원할 때만 유효) > on/off(True/False) > 모델 기본(None) 순으로 적용
             # (thinking 이 켜져 있으면 짧은 답변에도 수천 토큰을 생성해 턴 지연이 분 단위로 커진다)
+            #
+            # 단, 카탈로그의 reasoning_enabled=False 는 "이 모델은 thinking 을 못 쓴다"는 선언이므로
+            # 요청별 생각 강도가 이를 덮지 못하게 막는다. 덮으면 thinking 미지원 모델에
+            # think 가 전송되어 400 ("...does not support thinking") 으로 턴이 통째로 실패한다.
+            # think 를 false 로 보내는 것은 미지원 모델도 허용하므로 끄기는 항상 안전하다.
+            if model_configuration.reasoning_enabled is False:
+                reasoning_option = False
+            else:
+                reasoning_option = model_configuration.reasoning_effort or model_configuration.reasoning_enabled
             # 원격 ollama API(https://ollama.com)를 사용하는 경우 default_header_dictionary 에 Authorization 헤더를 포함한다
             client_kwargs = {"timeout" : model_configuration.timeout_second_count}
             if model_configuration.default_header_dictionary:
@@ -77,7 +86,7 @@ class ChatModelFactory:
                 model                = model_configuration.model_name,
                 base_url             = model_configuration.base_url or "http://localhost:11434",
                 temperature          = model_configuration.temperature,
-                reasoning            = model_configuration.reasoning_effort or model_configuration.reasoning_enabled,
+                reasoning            = reasoning_option,
                 num_ctx              = model_configuration.context_token_count,
                 num_predict          = model_configuration.maximum_token_count,
                 client_kwargs        = client_kwargs,

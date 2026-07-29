@@ -23,6 +23,10 @@ class ModelConfiguration:
     context_token_count       : Optional[int]            = None  # 컨텍스트 윈도우(num_ctx, ollama 전용) : 미설정 시 Ollama 기본 4096 — deepagents 시스템 프롬프트+히스토리가 이를 초과하면 프롬프트가 절단된다
     reasoning_effort          : Optional[str]            = None  # 생각 강도 : low | medium | high | None(모델 기본)
                                                                  # google → thinking_budget 매핑(low 1024 / medium 8192 / high 24576), ollama → think 레벨 전달(모델이 지원할 때만 유효)
+    tool_calling_enabled      : bool                     = True  # 도구 호출(tool calling) 지원 여부.
+                                                                 # False = 미지원 선언 → deepagents 대신 도구 없는 단순 그래프로 조립한다.
+                                                                 # (미지원 모델에 도구를 바인딩하면 ollama 가 400 "does not support tools" 로 턴을 통째로 실패시킨다.
+                                                                 #  예 : llama3.2-vision 은 capabilities 가 completion/vision 뿐이다)
 
     def __post_init__(self) -> None:
         if not isinstance(self.provider, str) or not self.provider.strip():
