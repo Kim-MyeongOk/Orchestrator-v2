@@ -39,7 +39,10 @@ from app.llm.image.vision_message_builder import VisionMessageBuilder   # noqa: 
 from common.storage.s3_helper             import s3_helper              # noqa: E402
 
 
+# ⚠️ 이 모델은 Ollama 0.24.x 에서만 돈다 (0.30.0+ 는 mllama 아키텍처를 버렸다).
+# 0.30 이상에서 이 테스트가 깨지면 파이프라인이 아니라 Ollama 버전을 의심해야 한다.
 VISION_MODEL_KEY   = "llama3_2_vision"
+VISION_MODEL_NAME  = "llama3.2-vision"
 HTTP_TIMEOUT       = 15
 INFERENCE_TIMEOUT  = 300
 
@@ -89,7 +92,7 @@ def _is_vision_model_available() -> bool:
         with urllib.request.urlopen("http://localhost:11434/api/tags", timeout = 5) as response:
             import json
             model_name_list = [entry["name"] for entry in json.loads(response.read()).get("models", [])]
-        return any(name.startswith("llama3.2-vision") for name in model_name_list)
+        return any(name.startswith(VISION_MODEL_NAME) for name in model_name_list)
     except Exception:
         return False
 
@@ -97,7 +100,7 @@ def _is_vision_model_available() -> bool:
 requires_minio  = pytest.mark.skipif(not _is_minio_reachable(),
                                      reason = "MinIO 에 연결할 수 없습니다 (S3_ENDPOINT_URL 확인)")
 requires_vision = pytest.mark.skipif(not _is_vision_model_available(),
-                                     reason = "Ollama llama3.2-vision 을 찾을 수 없습니다")
+                                     reason = f"Ollama {VISION_MODEL_NAME} 을 찾을 수 없습니다")
 
 
 @pytest.fixture
@@ -274,7 +277,7 @@ class TestVisionInlineConversion:
 
 
 ##################################################
-# ④ 실제 추론 : llama3.2-vision 이 이미지를 읽어내는가
+# ④ 실제 추론 : 비전 모델이 이미지를 읽어내는가
 ##################################################
 
 @requires_minio
@@ -303,11 +306,11 @@ class TestVisionInferenceEndToEnd:
         assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
         # ── ④ 추론
-        model_configuration = ModelCatalog.load_default().create_model_configuration(VISION_MODEL_KEY)
-        assert model_configuration.reasoning_enabled is not True, \
+        # 생각 강도를 함께 넘긴다 : UI 의 생각 정도가 thinking 미지원 모델을 깨뜨리던 회귀를 E2E 에서도 막는다
+        model_configuration = ModelCatalog.load_default().create_model_configuration(VISION_MODEL_KEY, reasoning_effort = "medium")
+        chat_model          = ChatModelFactory.create(model_configuration)
+        assert chat_model.reasoning is False, \
             "llama3.2-vision 은 thinking 을 지원하지 않습니다 (models.yaml 의 reasoning_enabled 확인)"
-
-        chat_model = ChatModelFactory.create(model_configuration)
         response   = chat_model.invoke([HumanMessage(content = content)])
         answer_text = str(response.content)
 
@@ -335,6 +338,51 @@ class TestVisionInferenceEndToEnd:
             ModelCatalog.load_default().create_model_configuration(VISION_MODEL_KEY))
         response = chat_model.invoke([HumanMessage(content = content)])
         assert "2" in str(response.content)
+
+
+##################################################
+# ④-2 생각 강도 오버라이드 : thinking 미지원 모델을 깨뜨리면 안 된다
+##################################################
+
+class TestReasoningOverrideSafety:
+    # 카탈로그의 reasoning_enabled=False 는 "이 모델은 thinking 을 못 쓴다"는 선언이다.
+    # UI 의 생각 정도(low/medium/high)가 이를 덮어쓰면 Ollama 가 400 을 던져
+    # ("...does not support thinking") 턴이 통째로 실패한다.
+    @staticmethod
+    def _create_ollama_configuration(reasoning_enabled, reasoning_effort):
+        from app.llm.agent.model_configuration import ModelConfiguration
+        return ModelConfiguration(
+            provider          = "ollama",
+            model_name        = "any-model",
+            reasoning_enabled = reasoning_enabled,
+            reasoning_effort  = reasoning_effort)
+
+    @pytest.mark.parametrize("reasoning_effort", ["low", "medium", "high"])
+    def test_effort_cannot_enable_thinking_on_unsupported_model(self, reasoning_effort):
+        from app.llm.agent.chat_model_factory import ChatModelFactory
+
+        chat_model = ChatModelFactory.create(
+            TestReasoningOverrideSafety._create_ollama_configuration(False, reasoning_effort))
+        assert chat_model.reasoning is False, (
+            f"생각 정도 '{reasoning_effort}' 가 reasoning_enabled=False 를 덮어썼습니다. "
+            "thinking 미지원 모델에서 400 이 발생합니다.")
+
+    @pytest.mark.parametrize("reasoning_effort", ["low", "medium", "high"])
+    def test_effort_still_applies_when_thinking_is_allowed(self, reasoning_effort):
+        # 반대 방향 회귀 방지 : 끄라고 선언하지 않은 모델은 생각 강도가 그대로 전달돼야 한다
+        from app.llm.agent.chat_model_factory import ChatModelFactory
+
+        for reasoning_enabled in (True, None):
+            chat_model = ChatModelFactory.create(
+                TestReasoningOverrideSafety._create_ollama_configuration(reasoning_enabled, reasoning_effort))
+            assert chat_model.reasoning == reasoning_effort
+
+    def test_model_default_is_kept_when_nothing_is_specified(self):
+        from app.llm.agent.chat_model_factory import ChatModelFactory
+
+        chat_model = ChatModelFactory.create(
+            TestReasoningOverrideSafety._create_ollama_configuration(None, None))
+        assert chat_model.reasoning is None
 
 
 ##################################################
