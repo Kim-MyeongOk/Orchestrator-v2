@@ -81,6 +81,7 @@ from app.llm.chat.chat_query_service                           import ChatQueryS
 from app.llm.image.image_upload_service                        import ImageUploadService
 from app.llm.image.vision_message_builder                      import VisionMessageBuilder
 from app.llm.agent.think_trimming_middleware                   import ThinkTrimmingMiddleware
+from app.llm.agent.image_stripping_middleware                  import ImageStrippingMiddleware
 from app.llm.reference.reference_context_builder               import ReferenceContextBuilder
 from app.monitor.api.bookmark_memo_update_request              import BookmarkMemoUpdateRequest
 from app.monitor.api.bookmark_upsert_request                   import BookmarkUpsertRequest
@@ -408,6 +409,10 @@ class ServerApplication:
         # 압축 미들웨어는 트리밍 뒤에 온다 — 생각 토큰이 걷힌 뒤의 메시지를 대상으로 창을 잡아야
         # 요약과 최근 원본이 같은 기준으로 정렬된다.
         middleware_list = [ThinkTrimmingMiddleware()]
+        # 비전 미지원 모델로 바꾸면, 예전에 붙인 이미지가 체크포인트에 남아 매 턴 재전송되어
+        # 400 "this model does not support image input" 으로 그 방이 통째로 막힌다 → 프롬프트에서만 걷어낸다
+        if not model_configuration.vision_enabled:
+            middleware_list.append(ImageStrippingMiddleware())
         if context_compression_middleware is not None:
             middleware_list.append(context_compression_middleware)
         return DeepAgentFactory.create(

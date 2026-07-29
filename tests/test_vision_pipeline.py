@@ -386,6 +386,63 @@ class TestReasoningOverrideSafety:
 
 
 ##################################################
+# ④-3 비전 미지원 모델 : 이미지 블록을 프롬프트에서 걷어낸다
+##################################################
+
+class TestImageStrippingForNonVisionModel:
+    # 한 번 이미지를 붙인 스레드는 그 블록이 체크포인트에 남아 매 턴 다시 실려 나간다.
+    # 모델을 비전 미지원으로 바꾸면 400 "this model does not support image input" 으로
+    # 그 방이 통째로 막히므로, 모델에 보내는 프롬프트에서만 이미지를 걷어내야 한다.
+    IMAGE_BLOCK = {"type" : "image_url", "image_url" : {"url" : "data:image/png;base64,AAAA"}}
+
+    def test_text_and_image_keeps_text_and_notes_removal(self):
+        from app.llm.image.image_content_helper import ImageContentHelper
+
+        stripped_content = ImageContentHelper.strip_image_block(
+            [{"type" : "text", "text" : "이거 뭐야?"}, TestImageStrippingForNonVisionModel.IMAGE_BLOCK])
+
+        assert isinstance(stripped_content, str), "블록이 하나만 남으면 평문으로 되돌려야 한다"
+        assert "이거 뭐야?" in stripped_content
+        assert ImageContentHelper.REMOVED_IMAGE_NOTICE_TEXT in stripped_content
+        assert "base64" not in stripped_content
+
+    def test_image_only_message_becomes_notice(self):
+        from app.llm.image.image_content_helper import ImageContentHelper
+
+        stripped_content = ImageContentHelper.strip_image_block([TestImageStrippingForNonVisionModel.IMAGE_BLOCK])
+        assert stripped_content == ImageContentHelper.REMOVED_IMAGE_NOTICE_TEXT
+
+    def test_plain_text_is_untouched(self):
+        from app.llm.image.image_content_helper import ImageContentHelper
+
+        assert ImageContentHelper.strip_image_block("그냥 텍스트") == "그냥 텍스트"
+        assert ImageContentHelper.has_image_block("그냥 텍스트") is False
+
+    def test_original_message_is_not_mutated(self):
+        # 체크포인트 원본이 바뀌면 비전 모델로 되돌렸을 때 이미지가 사라진다
+        from app.llm.image.image_content_helper import ImageContentHelper
+        from langchain_core.messages            import HumanMessage
+
+        original_message_list = [HumanMessage(content = [{"type" : "text", "text" : "이거 뭐야?"},
+                                                         TestImageStrippingForNonVisionModel.IMAGE_BLOCK])]
+        stripped_message_list = ImageContentHelper.strip_image_block_list(original_message_list)
+
+        assert ImageContentHelper.has_image_block(original_message_list[0].content) is True, "원본이 훼손되었습니다"
+        assert ImageContentHelper.has_image_block(stripped_message_list[0].content) is False
+
+    def test_catalog_declares_vision_support(self):
+        from app.llm.agent.model_catalog import ModelCatalog
+
+        model_catalog = ModelCatalog.load_default()
+        if model_catalog is None:
+            pytest.skip("모델 카탈로그(config/models.yaml)가 없습니다")
+
+        assert model_catalog.create_model_configuration(VISION_MODEL_KEY).vision_enabled is True
+        assert model_catalog.create_model_configuration("gpt_oss_120b").vision_enabled is False, \
+            "gpt-oss 는 capabilities 에 vision 이 없습니다 (models.yaml 의 vision_enabled 확인)"
+
+
+##################################################
 # ⑤ HTTP 엔드포인트 : 400 / 413 / 401 예외 응답
 ##################################################
 

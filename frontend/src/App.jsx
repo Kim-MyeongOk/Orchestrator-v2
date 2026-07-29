@@ -62,6 +62,7 @@ export default function App() {
     const [statusInfo, setStatusInfo]                     = useState(IDLE_STATUS);
     const [apiUrlText, setApiUrlText]                     = useState(getApiUrl());
     const [modelNameList, setModelNameList]               = useState([]);
+    const [visionModelNameList, setVisionModelNameList]   = useState([]);   // 이미지 첨부가 가능한 모델
     const [defaultModelName, setDefaultModelName]         = useState("");
     const [isDeveloperMode, setIsDeveloperMode]           = useState(
         () => localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === "on"
@@ -115,10 +116,11 @@ export default function App() {
 
         const loadModelOptionsAsync = async (attemptCount = 0) => {
             try {
-                const { defaultModel, modelNameList : loadedModelNameList } = await listModelsAsync();
+                const { defaultModel, modelNameList : loadedModelNameList, visionModelNameList : loadedVisionModelNameList } = await listModelsAsync();
                 if (isCancelled) return;
                 setDefaultModelName(defaultModel);
                 setModelNameList(loadedModelNameList);
+                setVisionModelNameList(loadedVisionModelNameList);
                 // 백엔드 프로바이더가 바뀌면 방에 저장된 이전 모델이 무효가 된다 → 기본 모델로 자동 초기화
                 rooms.dropInvalidRoomModels(new Set(loadedModelNameList));
             } catch (error) {
@@ -251,8 +253,15 @@ export default function App() {
         });
     }, []);
 
+    // 현재 방의 모델이 이미지를 읽을 수 있는지 (목록을 아직 못 받았으면 막지 않는다)
+    const activeModelName  = activeRoom?.model || defaultModelName;
+    const isVisionSupported = visionModelNameList.length === 0 || visionModelNameList.includes(activeModelName);
+
     const onAttachImageFileList = useCallback(async (fileList) => {
         if (isStreaming) { showToast("⚠ 응답 중에는 이미지를 첨부할 수 없습니다."); return; }
+        // 보내 봐야 서버가 프롬프트에서 걷어내므로, 조용히 무시되기 전에 여기서 막고 알린다
+        if (!isVisionSupported) { showToast(`⚠ ${activeModelName} 모델은 이미지를 읽지 못합니다.
+비전 모델로 바꾼 뒤 첨부해주세요.`); return; }
 
         const imageFileList = fileList.filter(file => file.type.startsWith("image/"));
         if (imageFileList.length < fileList.length) showToast("⚠ 이미지 파일만 첨부할 수 있습니다.");
@@ -293,7 +302,7 @@ export default function App() {
                 showToast(`⚠ ${pendingImage.fileName} 업로드 실패 : ${uploadError.message}`);
             }
         }
-    }, [isStreaming, showToast]);
+    }, [isStreaming, isVisionSupported, activeModelName, showToast]);
 
     /* ── 음성 받아쓰기 : 인식 결과를 입력창에 이어 붙인다 ── */
 
@@ -463,6 +472,7 @@ export default function App() {
                            attachedImageList={attachedImageList}
                            isUploadingImage={attachedImageList.some(attachedImage => attachedImage.isUploading)}
                            onAttachImageFileList={onAttachImageFileList} onRemoveImage={onRemoveImage}
+                           isVisionSupported={isVisionSupported} activeModelName={activeModelName}
                            reasoningEffort={activeRoom?.reasoningEffort || ""} onReasoningEffortChange={onReasoningEffortChange}
                            isEffortSettingsOpen={isEffortSettingsOpen} onToggleEffortSettingsOpen={setIsEffortSettingsOpen}
                            isEffortSettingsDisabled={!activeRoom}

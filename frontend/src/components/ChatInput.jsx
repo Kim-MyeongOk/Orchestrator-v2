@@ -19,7 +19,7 @@ const REFERENCE_PREVIEW_LENGTH      = 60;   // 태그 바에 보여줄 발췌 �
      📌 답변 #N : 답변을 우클릭해 통째로 담은 것 (여러 개)
    🎙 버튼으로 음성 받아쓰기를 켜면 인식 결과가 입력창에 실시간으로 채워진다. */
 
-export default function ChatInput({ inputValue, onInputValueChange, onSend, onStop, isStreaming, referencedText, onClearReference, reasoningEffort, onReasoningEffortChange, isEffortSettingsOpen, onToggleEffortSettingsOpen, isEffortSettingsDisabled, isRecognitionSupported, isRecording, onToggleRecording, selectedReferenceList, onRemoveReference, onClearAllReferences, attachedImageList, isUploadingImage, onAttachImageFileList, onRemoveImage }) {
+export default function ChatInput({ inputValue, onInputValueChange, onSend, onStop, isStreaming, referencedText, onClearReference, reasoningEffort, onReasoningEffortChange, isEffortSettingsOpen, onToggleEffortSettingsOpen, isEffortSettingsDisabled, isRecognitionSupported, isRecording, onToggleRecording, selectedReferenceList, onRemoveReference, onClearAllReferences, attachedImageList, isUploadingImage, onAttachImageFileList, onRemoveImage, isVisionSupported, activeModelName }) {
     const textareaRef  = useRef(null);
     const fileInputRef = useRef(null);
 
@@ -197,8 +197,11 @@ export default function ChatInput({ inputValue, onInputValueChange, onSend, onSt
                 {/* 이미지 첨부 : 파일 선택 (드래그앤드롭·붙여넣기도 같은 경로로 처리된다) */}
                 <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif"
                        multiple hidden onChange={onFileInputChange} />
-                <button type="button" onClick={onPickFileClick} disabled={isUploadingImage}
-                        title="이미지 첨부 (드래그앤드롭·붙여넣기 가능)" aria-label="이미지 첨부"
+                <button type="button" onClick={onPickFileClick} disabled={isUploadingImage || !isVisionSupported}
+                        title={isVisionSupported
+                            ? "이미지 첨부 (드래그앤드롭·붙여넣기 가능)"
+                            : `${activeModelName} 모델은 이미지를 읽지 못합니다`}
+                        aria-label="이미지 첨부"
                         className="shrink-0 w-11 h-11 rounded-xl flex items-center justify-center transition border bg-white dark:bg-slate-950 border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:border-indigo-400 dark:hover:border-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed">
                     <PaperclipIcon />
                 </button>

@@ -53,7 +53,10 @@ model_info :
             Authorization : "Bearer ${oc.env:OLLAMA_API_KEY,null}"
         reasoning_enabled         : false
         tool_calling_enabled      : false
+        vision_enabled            : true
 
+    # ⚠️ capabilities 는 completion/tools/thinking — vision 이 없다.
+    #    이미지를 보내면 400 "this model does not support image input" 이 난다.
     gpt_oss_120b :
         provider                  : ollama
         name                      : gpt-oss:120b-cloud
@@ -68,3 +71,4 @@ model_info :
         default_header_dictionary :
             Authorization : "Bearer ${oc.env:OLLAMA_API_KEY,null}"
         reasoning_enabled         : false
+        vision_enabled            : false

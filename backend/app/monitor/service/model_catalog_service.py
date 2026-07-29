@@ -28,9 +28,14 @@ class ModelCatalogService:
         # 프론트 모델 선택 드롭다운용.
         # 카탈로그 모드 : config/models.yaml 의 모델 키 목록을 그대로 노출한다 (요청의 model 값 = 카탈로그 키)
         if self.model_catalog is not None:
-            return {"default_model" : self.model_catalog.get_default_model_key(),
-                    "models"        : self.model_catalog.get_model_key_list(),
-                    "provider"      : "catalog"}
+            model_key_list = self.model_catalog.get_model_key_list()
+            # 비전 미지원 모델에서는 프론트가 첨부 버튼을 잠근다 —
+            # 보내 봐야 프롬프트에서 걷히므로(ImageStrippingMiddleware) 조용히 무시되는 편이 더 나쁘다
+            return {"default_model"      : self.model_catalog.get_default_model_key(),
+                    "models"             : model_key_list,
+                    "vision_model_list"  : [model_key for model_key in model_key_list
+                                            if self.model_catalog.create_model_configuration(model_key).vision_enabled],
+                    "provider"           : "catalog"}
 
         # 폴백 모드 : ollama 는 설치 모델을 프록시, 그 외 프로바이더는 기본 모델만 노출한다
         default_model  = os.getenv("MODEL_NAME", "qwen3-vl:4b")
