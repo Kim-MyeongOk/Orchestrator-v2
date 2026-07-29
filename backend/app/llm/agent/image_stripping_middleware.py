@@ -18,6 +18,15 @@ from app.llm.image.image_content_helper import ImageContentHelper
 
 
 class ImageStrippingMiddleware(AgentMiddleware):
+    # image_maximum_count = None : 전부 제거 (비전 미지원 모델)
+    #                       N    : 최신 N장만 남긴다 (llama3.2-vision 처럼 장수 제한이 있는 모델)
+    def __init__(self, image_maximum_count : int = None) -> None:
+        super().__init__()
+        self.image_maximum_count = image_maximum_count
+
     async def awrap_model_call(self, request, handler):
-        stripped_message_list = ImageContentHelper.strip_image_block_list(request.messages)
+        if self.image_maximum_count is None:
+            stripped_message_list = ImageContentHelper.strip_image_block_list(request.messages)
+        else:
+            stripped_message_list = ImageContentHelper.limit_image_block_list(request.messages, self.image_maximum_count)
         return await handler(request.override(messages = stripped_message_list))

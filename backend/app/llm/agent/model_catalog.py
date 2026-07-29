@@ -52,7 +52,10 @@ class ModelCatalog:
             context_token_count       = int(model_entry["context_token_count"])    if model_entry.get("context_token_count")  is not None else None,
             reasoning_effort          = reasoning_effort,
             tool_calling_enabled      = model_entry.get("tool_calling_enabled", True) is not False,  # 명시적으로 false 일 때만 미지원 (하위 호환)
-            vision_enabled            = model_entry.get("vision_enabled", True) is not False
+            vision_enabled            = model_entry.get("vision_enabled", True) is not False,
+            top_p                     = float(model_entry["top_p"])              if model_entry.get("top_p")              is not None else None,
+            repeat_penalty            = float(model_entry["repeat_penalty"])     if model_entry.get("repeat_penalty")     is not None else None,
+            image_maximum_count       = int(model_entry["image_maximum_count"])  if model_entry.get("image_maximum_count") is not None else None
         )
 
     def is_model_enabled(self, model_key : str) -> bool:

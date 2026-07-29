@@ -409,10 +409,14 @@ class ServerApplication:
         # 압축 미들웨어는 트리밍 뒤에 온다 — 생각 토큰이 걷힌 뒤의 메시지를 대상으로 창을 잡아야
         # 요약과 최근 원본이 같은 기준으로 정렬된다.
         middleware_list = [ThinkTrimmingMiddleware()]
-        # 비전 미지원 모델로 바꾸면, 예전에 붙인 이미지가 체크포인트에 남아 매 턴 재전송되어
-        # 400 "this model does not support image input" 으로 그 방이 통째로 막힌다 → 프롬프트에서만 걷어낸다
+        # 예전에 붙인 이미지는 체크포인트에 남아 매 턴 재전송된다. 그대로 두면
+        #   - 비전 미지원 모델 : 400 "this model does not support image input"
+        #   - 장수 제한 모델   : 400 "this model only supports one image"
+        # 로 그 방이 통째로 막히므로, 프롬프트에서만 걷어낸다 (체크포인트 원본은 보존)
         if not model_configuration.vision_enabled:
             middleware_list.append(ImageStrippingMiddleware())
+        elif model_configuration.image_maximum_count is not None:
+            middleware_list.append(ImageStrippingMiddleware(model_configuration.image_maximum_count))
         if context_compression_middleware is not None:
             middleware_list.append(context_compression_middleware)
         return DeepAgentFactory.create(

@@ -443,6 +443,83 @@ class TestImageStrippingForNonVisionModel:
 
 
 ##################################################
+# ④-4 이미지 장수 제한 · 샘플링 파라미터
+##################################################
+
+class TestImageCountLimitAndSampling:
+    # llama3.2-vision 은 한 요청에 이미지 1장만 지원한다.
+    # 대화가 이어지며 옛 이미지가 쌓이면 400 "this model only supports one image" 로 방이 막힌다.
+    IMAGE_BLOCK = {"type" : "image_url", "image_url" : {"url" : "data:image/png;base64,AAAA"}}
+
+    @staticmethod
+    def _build_message_list():
+        from langchain_core.messages import AIMessage
+        from langchain_core.messages import HumanMessage
+
+        image_block = TestImageCountLimitAndSampling.IMAGE_BLOCK
+        return [HumanMessage(content = [{"type" : "text", "text" : "첫 이미지"},   image_block]),
+                AIMessage(content = "빨강"),
+                HumanMessage(content = [{"type" : "text", "text" : "둘째 이미지"}, image_block]),
+                AIMessage(content = "초록"),
+                HumanMessage(content = [{"type" : "text", "text" : "셋째 이미지"}, image_block])]
+
+    def test_only_the_latest_image_is_kept(self):
+        from app.llm.image.image_content_helper import ImageContentHelper
+
+        message_list  = TestImageCountLimitAndSampling._build_message_list()
+        limited_list  = ImageContentHelper.limit_image_block_list(message_list, 1)
+        kept_flag_list = [ImageContentHelper.has_image_block(message.content) for message in limited_list]
+
+        assert kept_flag_list == [False, False, False, False, True], \
+            "가장 최근 이미지 1장만 남아야 합니다"
+
+    def test_older_messages_keep_their_text(self):
+        from app.llm.image.image_content_helper import ImageContentHelper
+
+        limited_list = ImageContentHelper.limit_image_block_list(
+            TestImageCountLimitAndSampling._build_message_list(), 1)
+        assert "첫 이미지" in str(limited_list[0].content), "이미지를 걷어내도 질문 텍스트는 남아야 합니다"
+
+    def test_original_message_list_is_not_mutated(self):
+        # 체크포인트 원본이 바뀌면 지난 대화의 이미지가 영영 사라진다
+        from app.llm.image.image_content_helper import ImageContentHelper
+
+        message_list = TestImageCountLimitAndSampling._build_message_list()
+        ImageContentHelper.limit_image_block_list(message_list, 1)
+
+        assert [ImageContentHelper.has_image_block(message.content) for message in message_list] \
+            == [True, False, True, False, True], "원본이 훼손되었습니다"
+
+    def test_vision_model_avoids_greedy_decoding(self):
+        # temperature 0.0(그리디)이면 한국어 답변이 같은 구절을 무한 반복한다 (실측 반복도 0.95)
+        from app.llm.agent.model_catalog import ModelCatalog
+
+        model_catalog = ModelCatalog.load_default()
+        if model_catalog is None:
+            pytest.skip("모델 카탈로그(config/models.yaml)가 없습니다")
+
+        model_configuration = model_catalog.create_model_configuration(VISION_MODEL_KEY)
+        assert model_configuration.temperature > 0.0, \
+            "llama3.2-vision 은 temperature 0.0 에서 답변이 무한 반복됩니다 (권장 0.6)"
+        assert model_configuration.image_maximum_count == 1, \
+            "llama3.2-vision 은 한 요청에 이미지 1장만 지원합니다"
+
+    def test_sampling_parameters_reach_the_chat_model(self):
+        from app.llm.agent.chat_model_factory import ChatModelFactory
+        from app.llm.agent.model_catalog      import ModelCatalog
+
+        model_catalog = ModelCatalog.load_default()
+        if model_catalog is None:
+            pytest.skip("모델 카탈로그(config/models.yaml)가 없습니다")
+
+        model_configuration = model_catalog.create_model_configuration(VISION_MODEL_KEY)
+        chat_model          = ChatModelFactory.create(model_configuration)
+
+        assert chat_model.top_p          == model_configuration.top_p
+        assert chat_model.repeat_penalty == model_configuration.repeat_penalty
+
+
+##################################################
 # ⑤ HTTP 엔드포인트 : 400 / 413 / 401 예외 응답
 ##################################################
 

@@ -50,6 +50,33 @@ class ImageContentHelper:
         return kept_block_list
 
     @staticmethod
+    def limit_image_block_list(message_list : List[Any], image_maximum_count : int) -> List[Any]:
+        # 최신 이미지 N장만 남기고 오래된 것부터 걷어낸다.
+        # llama3.2-vision 은 한 요청에 1장만 지원해서, 대화가 이어질수록 옛 이미지가 쌓여
+        # 400 "this model only supports one image" 로 그 방이 막힌다.
+        # (원본 메시지는 그대로 둔다 — 체크포인트 보존)
+        keep_index_set = set()
+        seen_image_count = 0
+        for message_index in reversed(range(len(message_list))):
+            message_content = getattr(message_list[message_index], "content", None)
+            if not ImageContentHelper.has_image_block(message_content):
+                continue
+            if seen_image_count < image_maximum_count:
+                keep_index_set.add(message_index)
+                seen_image_count += sum(1 for content_block in message_content
+                                        if ImageContentHelper._is_image_block(content_block))
+
+        limited_message_list = []
+        for message_index, message in enumerate(message_list):
+            message_content = getattr(message, "content", None)
+            if message_index in keep_index_set or not ImageContentHelper.has_image_block(message_content):
+                limited_message_list.append(message)
+                continue
+            limited_message_list.append(message.model_copy(
+                update = {"content" : ImageContentHelper.strip_image_block(message_content)}))
+        return limited_message_list
+
+    @staticmethod
     def strip_image_block_list(message_list : List[Any]) -> List[Any]:
         # 이미지가 섞인 메시지만 골라 새 객체로 바꾼다 (원본 메시지는 그대로 둔다 — 체크포인트 보존)
         stripped_message_list = []
