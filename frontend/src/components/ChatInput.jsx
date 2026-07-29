@@ -197,10 +197,11 @@ export default function ChatInput({ inputValue, onInputValueChange, onSend, onSt
                 {/* 이미지 첨부 : 파일 선택 (드래그앤드롭·붙여넣기도 같은 경로로 처리된다) */}
                 <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif"
                        multiple hidden onChange={onFileInputChange} />
-                <button type="button" onClick={onPickFileClick} disabled={isUploadingImage || !isVisionSupported}
+                {/* 비전 미지원 모델에서도 잠그지 않는다 — 첨부하면 비전 모델로 자동 전환된다 */}
+                <button type="button" onClick={onPickFileClick} disabled={isUploadingImage}
                         title={isVisionSupported
                             ? "이미지 첨부 (드래그앤드롭·붙여넣기 가능)"
-                            : `${activeModelName} 모델은 이미지를 읽지 못합니다`}
+                            : `이미지 첨부 (${activeModelName} 은 이미지를 못 읽어 비전 모델로 자동 전환됩니다)`}
                         aria-label="이미지 첨부"
                         className="shrink-0 w-11 h-11 rounded-xl flex items-center justify-center transition border bg-white dark:bg-slate-950 border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:border-indigo-400 dark:hover:border-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed">
                     <PaperclipIcon />

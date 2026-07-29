@@ -259,13 +259,18 @@ export default function App() {
 
     const onAttachImageFileList = useCallback(async (fileList) => {
         if (isStreaming) { showToast("⚠ 응답 중에는 이미지를 첨부할 수 없습니다."); return; }
-        // 보내 봐야 서버가 프롬프트에서 걷어내므로, 조용히 무시되기 전에 여기서 막고 알린다
-        if (!isVisionSupported) { showToast(`⚠ ${activeModelName} 모델은 이미지를 읽지 못합니다.
-비전 모델로 바꾼 뒤 첨부해주세요.`); return; }
 
         const imageFileList = fileList.filter(file => file.type.startsWith("image/"));
         if (imageFileList.length < fileList.length) showToast("⚠ 이미지 파일만 첨부할 수 있습니다.");
         if (imageFileList.length === 0) return;
+
+        // 이미지를 붙였는데 지금 모델이 못 읽으면 비전 모델로 자동 전환한다.
+        // 막아 세우고 "모델을 바꾸세요"라고 하면 사용자가 두 번 일하게 된다.
+        if (!isVisionSupported && visionModelNameList.length > 0 && activeRoom) {
+            const switchedModelName = visionModelNameList[0];
+            rooms.setRoomModel(activeRoom.roomId, switchedModelName);
+            showToast(`🖼 이미지를 읽기 위해 모델을 ${switchedModelName} 로 바꿨습니다.`);
+        }
 
         // 먼저 로컬 미리보기를 띄우고(업로드를 기다리지 않는다) 업로드 결과로 각 항목을 갱신한다
         const pendingImageList = imageFileList.slice(0, IMAGE_ATTACHMENT_MAXIMUM_COUNT).map(imageFile => ({
@@ -302,7 +307,7 @@ export default function App() {
                 showToast(`⚠ ${pendingImage.fileName} 업로드 실패 : ${uploadError.message}`);
             }
         }
-    }, [isStreaming, isVisionSupported, activeModelName, showToast]);
+    }, [isStreaming, isVisionSupported, visionModelNameList, activeRoom, rooms, showToast]);
 
     /* ── 음성 받아쓰기 : 인식 결과를 입력창에 이어 붙인다 ── */
 

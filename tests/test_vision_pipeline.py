@@ -430,6 +430,34 @@ class TestImageStrippingForNonVisionModel:
         assert ImageContentHelper.has_image_block(original_message_list[0].content) is True, "원본이 훼손되었습니다"
         assert ImageContentHelper.has_image_block(stripped_message_list[0].content) is False
 
+    def test_vision_answer_is_carried_into_the_image_slot(self):
+        # 비전 모델이 남긴 설명을 이미지 자리에 실어야, 텍스트 모델이
+        # "저는 이미지를 볼 수 없습니다"로 거절하지 않고 지난 대화를 근거로 이어간다
+        from app.llm.image.image_content_helper import ImageContentHelper
+        from langchain_core.messages            import AIMessage
+        from langchain_core.messages            import HumanMessage
+
+        message_list = [HumanMessage(content = [{"type" : "text", "text" : "이 이미지의 색은?"},
+                                                TestImageStrippingForNonVisionModel.IMAGE_BLOCK]),
+                        AIMessage(content = "배경은 녹색이고 단어는 FOREST 입니다."),
+                        HumanMessage(content = "그 이미지를 설명해줘.")]
+
+        stripped_text = str(ImageContentHelper.strip_image_block_list(message_list)[0].content)
+
+        assert "FOREST" in stripped_text, "비전 모델의 설명이 이미지 자리에 실리지 않았습니다"
+        assert "이 이미지의 색은?" in stripped_text, "원래 질문이 사라졌습니다"
+
+    def test_falls_back_to_notice_when_no_answer_follows(self):
+        # 아직 답변이 없는 현재 턴은 실을 설명이 없다 → 생략 안내로 떨어진다
+        from app.llm.image.image_content_helper import ImageContentHelper
+        from langchain_core.messages            import HumanMessage
+
+        message_list  = [HumanMessage(content = [{"type" : "text", "text" : "이거 뭐야?"},
+                                                 TestImageStrippingForNonVisionModel.IMAGE_BLOCK])]
+        stripped_text = str(ImageContentHelper.strip_image_block_list(message_list)[0].content)
+
+        assert ImageContentHelper.REMOVED_IMAGE_NOTICE_TEXT in stripped_text
+
     def test_catalog_declares_vision_support(self):
         from app.llm.agent.model_catalog import ModelCatalog
 
