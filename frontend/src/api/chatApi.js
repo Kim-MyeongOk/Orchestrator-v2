@@ -198,7 +198,7 @@ export async function listModelsAsync() {
 
 /* ══════════════════ 스트리밍 (NDJSON) ══════════════════ */
 
-export async function streamChatTurnAsync({ threadId, message, model, reasoningEffort, referencedText, referencedMessageIdList, imageUrlList, presetName, signal, onStart, onReasoning, onToken, onStreamError }) {
+export async function streamChatTurnAsync({ threadId, message, model, reasoningEffort, referencedText, referencedMessageIdList, imageUrlList, signal, onStart, onReasoning, onToken, onStreamError }) {
     // NDJSON 이벤트 스트림을 읽어 콜백으로 흘려보낸다.
     //   {"type":"start","run_id":...}     → onStart
     //   {"type":"reasoning","text":...}   → onReasoning (생각 과정)
@@ -214,7 +214,6 @@ export async function streamChatTurnAsync({ threadId, message, model, reasoningE
             reasoning_effort  : reasoningEffort || null,
             include_reasoning : true,
             referenced_text   : referencedText || null,   // 서버가 [참조 내용]/[질문] 형태로 조합한다
-            preset_name       : presetName || null,       // LLM 파라미터 프리셋 (LOW/MEDIUM/HIGH)
             referenced_message_id_list : referencedMessageIdList || [],  // 통째로 고른 이전 답변 ID ("agent-3")
             image_url_list             : imageUrlList || []              // MinIO 에 올린 이미지 URL (Vision 추론)
         }),
@@ -283,13 +282,3 @@ export async function uploadImageAsync(imageFile) {
     return { objectKey : result.object_key, imageUrl : result.image_url, contentType : result.content_type, byteCount : result.byte_count };
 }
 
-/* ══════════════════ 모델 파라미터 프리셋 ══════════════════ */
-
-export async function listModelPresetsAsync() {
-    // 프론트엔드 프리셋 선택 드롭다운용. 서버에서 LOW/MEDIUM/HIGH 프리셋 목록을 가져온다.
-    const result = await readJsonOrThrowAsync(await fetch(`${apiBaseUrl}/config/presets`));
-    return {
-        presets: result.presets,   // { "LOW": { ... }, "MEDIUM": { ... }, "HIGH": { ... } }
-        availablePresetNames: result.available_preset_names   // ["LOW", "MEDIUM", "HIGH"]
-    };
-}
