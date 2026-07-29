@@ -62,6 +62,7 @@ export default function App() {
     const [statusInfo, setStatusInfo]                     = useState(IDLE_STATUS);
     const [apiUrlText, setApiUrlText]                     = useState(getApiUrl());
     const [modelNameList, setModelNameList]               = useState([]);
+    const [visionModelNameList, setVisionModelNameList]   = useState([]);   // 이미지 첨부가 가능한 모델
     const [defaultModelName, setDefaultModelName]         = useState("");
     const [isDeveloperMode, setIsDeveloperMode]           = useState(
         () => localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === "on"
@@ -115,10 +116,11 @@ export default function App() {
 
         const loadModelOptionsAsync = async (attemptCount = 0) => {
             try {
-                const { defaultModel, modelNameList : loadedModelNameList } = await listModelsAsync();
+                const { defaultModel, modelNameList : loadedModelNameList, visionModelNameList : loadedVisionModelNameList } = await listModelsAsync();
                 if (isCancelled) return;
                 setDefaultModelName(defaultModel);
                 setModelNameList(loadedModelNameList);
+                setVisionModelNameList(loadedVisionModelNameList);
                 // 백엔드 프로바이더가 바뀌면 방에 저장된 이전 모델이 무효가 된다 → 기본 모델로 자동 초기화
                 rooms.dropInvalidRoomModels(new Set(loadedModelNameList));
             } catch (error) {
@@ -251,12 +253,24 @@ export default function App() {
         });
     }, []);
 
+    // 현재 방의 모델이 이미지를 읽을 수 있는지 (목록을 아직 못 받았으면 막지 않는다)
+    const activeModelName  = activeRoom?.model || defaultModelName;
+    const isVisionSupported = visionModelNameList.length === 0 || visionModelNameList.includes(activeModelName);
+
     const onAttachImageFileList = useCallback(async (fileList) => {
         if (isStreaming) { showToast("⚠ 응답 중에는 이미지를 첨부할 수 없습니다."); return; }
 
         const imageFileList = fileList.filter(file => file.type.startsWith("image/"));
         if (imageFileList.length < fileList.length) showToast("⚠ 이미지 파일만 첨부할 수 있습니다.");
         if (imageFileList.length === 0) return;
+
+        // 이미지를 붙였는데 지금 모델이 못 읽으면 비전 모델로 자동 전환한다.
+        // 막아 세우고 "모델을 바꾸세요"라고 하면 사용자가 두 번 일하게 된다.
+        if (!isVisionSupported && visionModelNameList.length > 0 && activeRoom) {
+            const switchedModelName = visionModelNameList[0];
+            rooms.setRoomModel(activeRoom.roomId, switchedModelName);
+            showToast(`🖼 이미지를 읽기 위해 모델을 ${switchedModelName} 로 바꿨습니다.`);
+        }
 
         // 먼저 로컬 미리보기를 띄우고(업로드를 기다리지 않는다) 업로드 결과로 각 항목을 갱신한다
         const pendingImageList = imageFileList.slice(0, IMAGE_ATTACHMENT_MAXIMUM_COUNT).map(imageFile => ({
@@ -293,7 +307,7 @@ export default function App() {
                 showToast(`⚠ ${pendingImage.fileName} 업로드 실패 : ${uploadError.message}`);
             }
         }
-    }, [isStreaming, showToast]);
+    }, [isStreaming, isVisionSupported, visionModelNameList, activeRoom, rooms, showToast]);
 
     /* ── 음성 받아쓰기 : 인식 결과를 입력창에 이어 붙인다 ── */
 
@@ -463,6 +477,7 @@ export default function App() {
                            attachedImageList={attachedImageList}
                            isUploadingImage={attachedImageList.some(attachedImage => attachedImage.isUploading)}
                            onAttachImageFileList={onAttachImageFileList} onRemoveImage={onRemoveImage}
+                           isVisionSupported={isVisionSupported} activeModelName={activeModelName}
                            reasoningEffort={activeRoom?.reasoningEffort || ""} onReasoningEffortChange={onReasoningEffortChange}
                            isEffortSettingsOpen={isEffortSettingsOpen} onToggleEffortSettingsOpen={setIsEffortSettingsOpen}
                            isEffortSettingsDisabled={!activeRoom}

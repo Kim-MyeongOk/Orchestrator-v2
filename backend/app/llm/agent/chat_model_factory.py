@@ -87,6 +87,8 @@ class ChatModelFactory:
                 base_url             = model_configuration.base_url or "http://localhost:11434",
                 temperature          = model_configuration.temperature,
                 reasoning            = reasoning_option,
+                top_p                = model_configuration.top_p,
+                repeat_penalty       = model_configuration.repeat_penalty,
                 num_ctx              = model_configuration.context_token_count,
                 num_predict          = model_configuration.maximum_token_count,
                 client_kwargs        = client_kwargs,

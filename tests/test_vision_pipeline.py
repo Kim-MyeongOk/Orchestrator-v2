@@ -386,6 +386,168 @@ class TestReasoningOverrideSafety:
 
 
 ##################################################
+# ④-3 비전 미지원 모델 : 이미지 블록을 프롬프트에서 걷어낸다
+##################################################
+
+class TestImageStrippingForNonVisionModel:
+    # 한 번 이미지를 붙인 스레드는 그 블록이 체크포인트에 남아 매 턴 다시 실려 나간다.
+    # 모델을 비전 미지원으로 바꾸면 400 "this model does not support image input" 으로
+    # 그 방이 통째로 막히므로, 모델에 보내는 프롬프트에서만 이미지를 걷어내야 한다.
+    IMAGE_BLOCK = {"type" : "image_url", "image_url" : {"url" : "data:image/png;base64,AAAA"}}
+
+    def test_text_and_image_keeps_text_and_notes_removal(self):
+        from app.llm.image.image_content_helper import ImageContentHelper
+
+        stripped_content = ImageContentHelper.strip_image_block(
+            [{"type" : "text", "text" : "이거 뭐야?"}, TestImageStrippingForNonVisionModel.IMAGE_BLOCK])
+
+        assert isinstance(stripped_content, str), "블록이 하나만 남으면 평문으로 되돌려야 한다"
+        assert "이거 뭐야?" in stripped_content
+        assert ImageContentHelper.REMOVED_IMAGE_NOTICE_TEXT in stripped_content
+        assert "base64" not in stripped_content
+
+    def test_image_only_message_becomes_notice(self):
+        from app.llm.image.image_content_helper import ImageContentHelper
+
+        stripped_content = ImageContentHelper.strip_image_block([TestImageStrippingForNonVisionModel.IMAGE_BLOCK])
+        assert stripped_content == ImageContentHelper.REMOVED_IMAGE_NOTICE_TEXT
+
+    def test_plain_text_is_untouched(self):
+        from app.llm.image.image_content_helper import ImageContentHelper
+
+        assert ImageContentHelper.strip_image_block("그냥 텍스트") == "그냥 텍스트"
+        assert ImageContentHelper.has_image_block("그냥 텍스트") is False
+
+    def test_original_message_is_not_mutated(self):
+        # 체크포인트 원본이 바뀌면 비전 모델로 되돌렸을 때 이미지가 사라진다
+        from app.llm.image.image_content_helper import ImageContentHelper
+        from langchain_core.messages            import HumanMessage
+
+        original_message_list = [HumanMessage(content = [{"type" : "text", "text" : "이거 뭐야?"},
+                                                         TestImageStrippingForNonVisionModel.IMAGE_BLOCK])]
+        stripped_message_list = ImageContentHelper.strip_image_block_list(original_message_list)
+
+        assert ImageContentHelper.has_image_block(original_message_list[0].content) is True, "원본이 훼손되었습니다"
+        assert ImageContentHelper.has_image_block(stripped_message_list[0].content) is False
+
+    def test_vision_answer_is_carried_into_the_image_slot(self):
+        # 비전 모델이 남긴 설명을 이미지 자리에 실어야, 텍스트 모델이
+        # "저는 이미지를 볼 수 없습니다"로 거절하지 않고 지난 대화를 근거로 이어간다
+        from app.llm.image.image_content_helper import ImageContentHelper
+        from langchain_core.messages            import AIMessage
+        from langchain_core.messages            import HumanMessage
+
+        message_list = [HumanMessage(content = [{"type" : "text", "text" : "이 이미지의 색은?"},
+                                                TestImageStrippingForNonVisionModel.IMAGE_BLOCK]),
+                        AIMessage(content = "배경은 녹색이고 단어는 FOREST 입니다."),
+                        HumanMessage(content = "그 이미지를 설명해줘.")]
+
+        stripped_text = str(ImageContentHelper.strip_image_block_list(message_list)[0].content)
+
+        assert "FOREST" in stripped_text, "비전 모델의 설명이 이미지 자리에 실리지 않았습니다"
+        assert "이 이미지의 색은?" in stripped_text, "원래 질문이 사라졌습니다"
+
+    def test_falls_back_to_notice_when_no_answer_follows(self):
+        # 아직 답변이 없는 현재 턴은 실을 설명이 없다 → 생략 안내로 떨어진다
+        from app.llm.image.image_content_helper import ImageContentHelper
+        from langchain_core.messages            import HumanMessage
+
+        message_list  = [HumanMessage(content = [{"type" : "text", "text" : "이거 뭐야?"},
+                                                 TestImageStrippingForNonVisionModel.IMAGE_BLOCK])]
+        stripped_text = str(ImageContentHelper.strip_image_block_list(message_list)[0].content)
+
+        assert ImageContentHelper.REMOVED_IMAGE_NOTICE_TEXT in stripped_text
+
+    def test_catalog_declares_vision_support(self):
+        from app.llm.agent.model_catalog import ModelCatalog
+
+        model_catalog = ModelCatalog.load_default()
+        if model_catalog is None:
+            pytest.skip("모델 카탈로그(config/models.yaml)가 없습니다")
+
+        assert model_catalog.create_model_configuration(VISION_MODEL_KEY).vision_enabled is True
+        assert model_catalog.create_model_configuration("gpt_oss_120b").vision_enabled is False, \
+            "gpt-oss 는 capabilities 에 vision 이 없습니다 (models.yaml 의 vision_enabled 확인)"
+
+
+##################################################
+# ④-4 이미지 장수 제한 · 샘플링 파라미터
+##################################################
+
+class TestImageCountLimitAndSampling:
+    # llama3.2-vision 은 한 요청에 이미지 1장만 지원한다.
+    # 대화가 이어지며 옛 이미지가 쌓이면 400 "this model only supports one image" 로 방이 막힌다.
+    IMAGE_BLOCK = {"type" : "image_url", "image_url" : {"url" : "data:image/png;base64,AAAA"}}
+
+    @staticmethod
+    def _build_message_list():
+        from langchain_core.messages import AIMessage
+        from langchain_core.messages import HumanMessage
+
+        image_block = TestImageCountLimitAndSampling.IMAGE_BLOCK
+        return [HumanMessage(content = [{"type" : "text", "text" : "첫 이미지"},   image_block]),
+                AIMessage(content = "빨강"),
+                HumanMessage(content = [{"type" : "text", "text" : "둘째 이미지"}, image_block]),
+                AIMessage(content = "초록"),
+                HumanMessage(content = [{"type" : "text", "text" : "셋째 이미지"}, image_block])]
+
+    def test_only_the_latest_image_is_kept(self):
+        from app.llm.image.image_content_helper import ImageContentHelper
+
+        message_list  = TestImageCountLimitAndSampling._build_message_list()
+        limited_list  = ImageContentHelper.limit_image_block_list(message_list, 1)
+        kept_flag_list = [ImageContentHelper.has_image_block(message.content) for message in limited_list]
+
+        assert kept_flag_list == [False, False, False, False, True], \
+            "가장 최근 이미지 1장만 남아야 합니다"
+
+    def test_older_messages_keep_their_text(self):
+        from app.llm.image.image_content_helper import ImageContentHelper
+
+        limited_list = ImageContentHelper.limit_image_block_list(
+            TestImageCountLimitAndSampling._build_message_list(), 1)
+        assert "첫 이미지" in str(limited_list[0].content), "이미지를 걷어내도 질문 텍스트는 남아야 합니다"
+
+    def test_original_message_list_is_not_mutated(self):
+        # 체크포인트 원본이 바뀌면 지난 대화의 이미지가 영영 사라진다
+        from app.llm.image.image_content_helper import ImageContentHelper
+
+        message_list = TestImageCountLimitAndSampling._build_message_list()
+        ImageContentHelper.limit_image_block_list(message_list, 1)
+
+        assert [ImageContentHelper.has_image_block(message.content) for message in message_list] \
+            == [True, False, True, False, True], "원본이 훼손되었습니다"
+
+    def test_vision_model_avoids_greedy_decoding(self):
+        # temperature 0.0(그리디)이면 한국어 답변이 같은 구절을 무한 반복한다 (실측 반복도 0.95)
+        from app.llm.agent.model_catalog import ModelCatalog
+
+        model_catalog = ModelCatalog.load_default()
+        if model_catalog is None:
+            pytest.skip("모델 카탈로그(config/models.yaml)가 없습니다")
+
+        model_configuration = model_catalog.create_model_configuration(VISION_MODEL_KEY)
+        assert model_configuration.temperature > 0.0, \
+            "llama3.2-vision 은 temperature 0.0 에서 답변이 무한 반복됩니다 (권장 0.6)"
+        assert model_configuration.image_maximum_count == 1, \
+            "llama3.2-vision 은 한 요청에 이미지 1장만 지원합니다"
+
+    def test_sampling_parameters_reach_the_chat_model(self):
+        from app.llm.agent.chat_model_factory import ChatModelFactory
+        from app.llm.agent.model_catalog      import ModelCatalog
+
+        model_catalog = ModelCatalog.load_default()
+        if model_catalog is None:
+            pytest.skip("모델 카탈로그(config/models.yaml)가 없습니다")
+
+        model_configuration = model_catalog.create_model_configuration(VISION_MODEL_KEY)
+        chat_model          = ChatModelFactory.create(model_configuration)
+
+        assert chat_model.top_p          == model_configuration.top_p
+        assert chat_model.repeat_penalty == model_configuration.repeat_penalty
+
+
+##################################################
 # ⑤ HTTP 엔드포인트 : 400 / 413 / 401 예외 응답
 ##################################################
 

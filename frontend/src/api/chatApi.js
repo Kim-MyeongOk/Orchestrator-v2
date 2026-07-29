@@ -193,7 +193,10 @@ export async function listModelsAsync() {
     // 인증 없이 열려 있는 엔드포인트라 기본 fetch 를 쓴다
     const response = await fetch(`${apiBaseUrl}/models`);
     const result   = await readJsonOrThrowAsync(response);
-    return { defaultModel : result.default_model, modelNameList : result.models };
+    // visionModelNameList : 이미지 첨부가 가능한 모델. 없으면(폴백 모드) 전부 허용으로 본다
+    return { defaultModel     : result.default_model,
+             modelNameList    : result.models,
+             visionModelNameList : result.vision_model_list || result.models };
 }
 
 /* ══════════════════ 스트리밍 (NDJSON) ══════════════════ */

@@ -23,6 +23,17 @@ class ModelConfiguration:
     context_token_count       : Optional[int]            = None  # 컨텍스트 윈도우(num_ctx, ollama 전용) : 미설정 시 Ollama 기본 4096 — deepagents 시스템 프롬프트+히스토리가 이를 초과하면 프롬프트가 절단된다
     reasoning_effort          : Optional[str]            = None  # 생각 강도 : low | medium | high | None(모델 기본)
                                                                  # google → thinking_budget 매핑(low 1024 / medium 8192 / high 24576), ollama → think 레벨 전달(모델이 지원할 때만 유효)
+    top_p                     : Optional[float]          = None  # 누적 확률 샘플링 (ollama 전용). None = 모델 기본
+    repeat_penalty            : Optional[float]          = None  # 반복 억제 (ollama 전용). None = 모델 기본
+                                                                 # temperature 0.0(그리디)은 모델에 따라 같은 구절을 무한 반복한다.
+                                                                 # 예 : llama3.2-vision 은 한국어에서 반복도 0.95 로 폭주한다 (권장값 0.6/0.9)
+    image_maximum_count       : Optional[int]            = None  # 프롬프트에 남길 이미지 최대 개수. None = 제한 없음
+                                                                 # (llama3.2-vision 은 1장만 지원 —
+                                                                 #  한 요청에 2장 이상이면 ollama 가 400 "this model only supports one image" 를 던진다)
+    vision_enabled            : bool                     = True  # 이미지 입력(vision) 지원 여부.
+                                                                 # False = 미지원 선언 → 모델에 보내는 프롬프트에서 이미지 블록을 걷어낸다.
+                                                                 # (미지원 모델에 이미지를 보내면 400 "this model does not support image input" 으로 턴이 실패한다.
+                                                                 #  한 번 이미지를 붙인 스레드는 체크포인트에 남아 매 턴 재전송되므로 모델을 바꾸면 그 방이 통째로 막힌다)
     tool_calling_enabled      : bool                     = True  # 도구 호출(tool calling) 지원 여부.
                                                                  # False = 미지원 선언 → deepagents 대신 도구 없는 단순 그래프로 조립한다.
                                                                  # (미지원 모델에 도구를 바인딩하면 ollama 가 400 "does not support tools" 로 턴을 통째로 실패시킨다.

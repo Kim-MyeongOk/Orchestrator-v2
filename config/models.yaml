@@ -44,7 +44,14 @@ model_info :
         api_key                   : ${oc.env:OLLAMA_API_KEY,null}
         base_url                  : http://localhost:11434
         enable                    : true
-        temperature               : 0.0
+        # ⚠️ temperature 0.0(그리디)으로 두면 한국어 답변이 같은 구절을 무한 반복한다
+        #    (실측 반복도 0.95 → 0.6/0.9 로 해소). 아래는 모델 자체 권장값이다.
+        temperature               : 0.6
+        top_p                     : 0.9
+        repeat_penalty            : 1.1
+        # 한 요청에 이미지 1장만 지원한다. 대화가 이어지면 옛 이미지가 쌓여
+        # 400 "this model only supports one image" 로 방이 막히므로 최신 1장만 남긴다
+        image_maximum_count       : 1
         maximum_token_count       : 4096
         context_token_count       : 16384
         timeout_second_count      : 120.0
@@ -53,7 +60,10 @@ model_info :
             Authorization : "Bearer ${oc.env:OLLAMA_API_KEY,null}"
         reasoning_enabled         : false
         tool_calling_enabled      : false
+        vision_enabled            : true
 
+    # ⚠️ capabilities 는 completion/tools/thinking — vision 이 없다.
+    #    이미지를 보내면 400 "this model does not support image input" 이 난다.
     gpt_oss_120b :
         provider                  : ollama
         name                      : gpt-oss:120b-cloud
@@ -68,3 +78,4 @@ model_info :
         default_header_dictionary :
             Authorization : "Bearer ${oc.env:OLLAMA_API_KEY,null}"
         reasoning_enabled         : false
+        vision_enabled            : false
