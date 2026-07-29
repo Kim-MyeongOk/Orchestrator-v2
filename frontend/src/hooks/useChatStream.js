@@ -51,7 +51,6 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
         const referencedText          = turnOption.referencedText || "";
         const referencedMessageIdList = turnOption.referencedMessageIdList || [];
         const imageUrlList            = turnOption.imageUrlList || [];
-        const presetName              = turnOption.presetName || "";
 
         const formatElapsedSecondText = (startedAt) => ((performance.now() - startedAt) / 1000).toFixed(1);
 
@@ -89,7 +88,6 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
                     referencedText  : referencedText,
                     referencedMessageIdList : referencedMessageIdList,
                     imageUrlList    : imageUrlList,
-                    presetName      : presetName,
                     signal          : abortControllerRef.current.signal,
                     onStart         : (runId) => { if (runId) setRoomLastRunId(room.roomId, runId); },
                     onReasoning     : (chunkText) => {
@@ -120,7 +118,7 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
                         appendMessage(room.roomId, buildAgentMessage());
                         appendMessage(room.roomId, { role : "error", text : shownErrorText });
                     } else {
-                        appendMessage(room.roomId, { role : "error", text : shownErrorText, retryMessageText : messageText, retryTurnOption : { referencedText, referencedMessageIdList, imageUrlList, presetName } });
+                        appendMessage(room.roomId, { role : "error", text : shownErrorText, retryMessageText : messageText, retryTurnOption : { referencedText, referencedMessageIdList, imageUrlList } });
                     }
                     finalStatus = { text : "오류", toneClass : "bg-red-500" };
                     showToast(`⚠ ${isDeveloperMode ? streamErrorText : "서버 응답 오류 — 잠시 후 다시 시도해주세요."}`);
@@ -163,7 +161,7 @@ export function useChatStream({ appendMessage, applyFirstMessageTitle, setRoomLa
                     shownErrorText = `${failReasonText} — 자동 재시도 ${attemptCount}회 모두 실패했거나 재시도할 수 없는 오류입니다.`;
                 }
                 if (hasReceivedAnyText()) appendMessage(room.roomId, buildAgentMessage());
-                appendMessage(room.roomId, { role : "error", text : shownErrorText, retryMessageText : messageText, retryTurnOption : { referencedText, referencedMessageIdList, imageUrlList, presetName } });
+                appendMessage(room.roomId, { role : "error", text : shownErrorText, retryMessageText : messageText, retryTurnOption : { referencedText, referencedMessageIdList, imageUrlList } });
                 finalStatus = { text : "오류", toneClass : "bg-red-500" };
                 showToast(`⚠ ${failReasonText}\n백엔드(포트 8000) 실행 여부를 확인한 뒤 '다시 시도'를 눌러주세요.`);
                 break;

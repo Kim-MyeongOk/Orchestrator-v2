@@ -9,14 +9,15 @@ const TAB_INACTIVE_CLASS      = "text-slate-500 dark:text-slate-400";
 const SELECT_CLASS            = "w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition";
 const FIELD_LABEL_CLASS       = "block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1.5";
 
-/* 좌측 사이드바 : 새 채팅방 · 채팅방/북마크 탭 · 세션 설정(모델·생각 정도·개발자 모드) */
+/* 좌측 사이드바 : 새 채팅방 · 채팅방/북마크 탭 · 세션 설정(모델·개발자 모드)
+   생각 정도는 입력창 톱니바퀴(ReasoningEffortPopover)에 있다 */
 
 export default function Sidebar({
     userId, roomList, activeRoom, activeRoomId, isStreaming,
     sidebarTabName, onSidebarTabChange,
     bookmarkList, onOpenBookmark, onRemoveBookmark, onUpdateBookmarkMemo,
     onCreateRoom, onSwitchRoom, onRenameRoom, onDeleteRoom, onBlockedRename,
-    modelNameList, defaultModelName, onModelChange, onReasoningEffortChange,
+    modelNameList, defaultModelName, onModelChange,
     isDeveloperMode, onToggleDeveloperMode, apiUrlText, onApiUrlChange,
     onResetSession, onLogout
 }) {
@@ -82,15 +83,8 @@ export default function Sidebar({
                     </select>
                 </div>
 
-                <div>
-                    <label className={FIELD_LABEL_CLASS}>생각 정도</label>
-                    <select value={activeRoom?.reasoningEffort || ""} onChange={(event) => onReasoningEffortChange(event.target.value)} className={SELECT_CLASS}>
-                        <option value="">모델 기본</option>
-                        <option value="low">낮음 (빠른 응답)</option>
-                        <option value="medium">보통</option>
-                        <option value="high">높음 (깊은 사고)</option>
-                    </select>
-                </div>
+                {/* 생각 정도는 입력창의 톱니바퀴(ReasoningEffortPopover)로 옮겼다 —
+                    3단계 선택이 두 군데 있으면 어느 쪽이 듣는지 헷갈린다 */}
 
                 {/* 개발자 모드 토글 : 켰을 때만 API URL / Thread ID 노출 */}
                 <div className="flex items-center justify-between">

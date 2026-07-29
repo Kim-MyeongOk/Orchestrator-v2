@@ -22,7 +22,6 @@ import { getApiUrl }             from "./api/chatApi";
 import { getAuthToken }          from "./api/chatApi";
 import { getUserId }             from "./api/chatApi";
 import { listModelsAsync }       from "./api/chatApi";
-import { listModelPresetsAsync } from "./api/chatApi";
 import { logout }                from "./api/chatApi";
 import { setApiUrl }              from "./api/chatApi";
 import { takeLogoutReasonText }   from "./api/chatApi";
@@ -55,7 +54,8 @@ export default function App() {
     const [selectedReferenceList, setSelectedReferenceList] = useState([]);
     // 첨부한 이미지들 : [{ attachmentId, fileName, previewUrl, imageUrl, isUploading, errorText }] (전송 후 비운다)
     const [attachedImageList, setAttachedImageList]         = useState([]);
-    const [presetName, setPresetName]                     = useState("MEDIUM");   // LLM 파라미터 프리셋 (LOW/MEDIUM/HIGH)
+    // 생각 정도는 방(room)별 값이라 여기서 들고 있지 않는다 — 톱니바퀴의 열림 상태만 관리한다
+    const [isEffortSettingsOpen, setIsEffortSettingsOpen] = useState(false);
     const [sidebarTabName, setSidebarTabName]             = useState("rooms");
     const [isResetModalOpen, setIsResetModalOpen]         = useState(false);
     const [scrollTargetAgentIndex, setScrollTargetAgentIndex] = useState(null);
@@ -63,7 +63,6 @@ export default function App() {
     const [apiUrlText, setApiUrlText]                     = useState(getApiUrl());
     const [modelNameList, setModelNameList]               = useState([]);
     const [defaultModelName, setDefaultModelName]         = useState("");
-    const [availablePresetNames, setAvailablePresetNames] = useState([]);   // LLM 파라미터 프리셋 목록 (LOW/MEDIUM/HIGH)
     const [isDeveloperMode, setIsDeveloperMode]           = useState(
         () => localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === "on"
     );
@@ -137,27 +136,13 @@ export default function App() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [apiUrlText]);
 
-    /* ── LLM 파라미터 프리셋 목록 ── */
+    /* ── 생각 정도 (톱니바퀴 설정) ── */
 
-    useEffect(() => {
-        let isCancelled = false;
-
-        const loadPresetsAsync = async () => {
-            try {
-                const { availablePresetNames : loadedPresetNames } = await listModelPresetsAsync();
-                if (isCancelled) return;
-                setAvailablePresetNames(loadedPresetNames);
-            } catch (error) {
-                if (isCancelled) return;
-                // 프리셋 로드 실패는 조용히 처리 (기본값 MEDIUM으로 계속 동작)
-                console.warn("Failed to load model presets:", error.message);
-            }
-        };
-        loadPresetsAsync();
-
-        return () => { isCancelled = true; };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiUrlText]);
+    // 방별 값이라 방에 저장한다. 빈 문자열이면 모델 기본 동작을 따른다.
+    const onReasoningEffortChange = useCallback((nextReasoningEffort) => {
+        if (!activeRoom) return;
+        rooms.setRoomReasoningEffort(activeRoom.roomId, nextReasoningEffort);
+    }, [activeRoom, rooms]);
 
     /* ── 개발자 모드 ── */
 
@@ -190,8 +175,7 @@ export default function App() {
         const sentTurnOption = {
             referencedText          : referencedText,
             referencedMessageIdList : selectedReferenceList.map(reference => reference.messageId),
-            imageUrlList            : uploadedImageUrlList,
-            presetName              : presetName
+            imageUrlList            : uploadedImageUrlList
         };
         stt.stopRecording();   // 받아쓰기가 켜진 채로 두면 방금 비운 입력창에 보낸 문장이 되살아난다
         isSendInFlightRef.current = true;   // 턴이 끝날 때까지 초안을 지키게 한다
@@ -209,7 +193,7 @@ export default function App() {
         // location.replace() 는 실행을 즉시 멈추지 않아 이 줄까지 흘러오므로, 토큰이 남아 있는지로 판별한다.
         if (getAuthToken()) localStorage.removeItem(INPUT_DRAFT_STORAGE_KEY);
         setStatusInfo(finalStatus);
-    }, [activeRoom, attachedImageList, inputValue, isStreaming, referencedText, selectedReferenceList, presetName, showToast, stream, stt]);
+    }, [activeRoom, attachedImageList, inputValue, isStreaming, referencedText, selectedReferenceList, showToast, stream, stt]);
 
     const onRetryError = useCallback(async (errorMessage) => {
         if (isStreaming || !activeRoom) return;
@@ -353,9 +337,9 @@ export default function App() {
         setReferencedText("");
 
         // ③ 수정된 질문으로 그 지점부터 대화를 이어간다 (프리셋은 지금 고른 값을 유지한다)
-        const finalStatus = await stream.sendMessageAsync({ ...activeRoom, messages : keptMessageList }, editedText, { presetName : presetName });
+        const finalStatus = await stream.sendMessageAsync({ ...activeRoom, messages : keptMessageList }, editedText, {});
         setStatusInfo(finalStatus);
-    }, [activeRoom, bookmarks, isStreaming, presetName, rooms, showToast, stream]);
+    }, [activeRoom, bookmarks, isStreaming, rooms, showToast, stream]);
 
     /* ── 방 조작 ── */
 
@@ -439,7 +423,6 @@ export default function App() {
                 modelNameList={modelNameList}
                 defaultModelName={defaultModelName}
                 onModelChange={(modelName) => activeRoom && rooms.setRoomModel(activeRoom.roomId, modelName)}
-                onReasoningEffortChange={(reasoningEffort) => activeRoom && rooms.setRoomReasoningEffort(activeRoom.roomId, reasoningEffort)}
                 isDeveloperMode={isDeveloperMode}
                 onToggleDeveloperMode={onToggleDeveloperMode}
                 apiUrlText={apiUrlText}
@@ -480,7 +463,9 @@ export default function App() {
                            attachedImageList={attachedImageList}
                            isUploadingImage={attachedImageList.some(attachedImage => attachedImage.isUploading)}
                            onAttachImageFileList={onAttachImageFileList} onRemoveImage={onRemoveImage}
-                           presetName={presetName} onPresetNameChange={setPresetName} availablePresetNames={availablePresetNames}
+                           reasoningEffort={activeRoom?.reasoningEffort || ""} onReasoningEffortChange={onReasoningEffortChange}
+                           isEffortSettingsOpen={isEffortSettingsOpen} onToggleEffortSettingsOpen={setIsEffortSettingsOpen}
+                           isEffortSettingsDisabled={!activeRoom}
                            isRecognitionSupported={stt.isRecognitionSupported} isRecording={stt.isRecording} onToggleRecording={onToggleRecording} />
             </main>
 

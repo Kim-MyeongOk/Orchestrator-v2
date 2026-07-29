@@ -2,6 +2,8 @@ import { useEffect } from "react";
 import { useRef }    from "react";
 import { useState }  from "react";
 
+import ReasoningEffortPopover from "./ReasoningEffortPopover";
+
 import { MicrophoneIcon } from "./icons";
 import { PaperclipIcon }  from "./icons";
 import { SendIcon }       from "./icons";
@@ -17,7 +19,7 @@ const REFERENCE_PREVIEW_LENGTH      = 60;   // 태그 바에 보여줄 발췌 �
      📌 답변 #N : 답변을 우클릭해 통째로 담은 것 (여러 개)
    🎙 버튼으로 음성 받아쓰기를 켜면 인식 결과가 입력창에 실시간으로 채워진다. */
 
-export default function ChatInput({ inputValue, onInputValueChange, onSend, onStop, isStreaming, referencedText, onClearReference, presetName, onPresetNameChange, availablePresetNames, isRecognitionSupported, isRecording, onToggleRecording, selectedReferenceList, onRemoveReference, onClearAllReferences, attachedImageList, isUploadingImage, onAttachImageFileList, onRemoveImage }) {
+export default function ChatInput({ inputValue, onInputValueChange, onSend, onStop, isStreaming, referencedText, onClearReference, reasoningEffort, onReasoningEffortChange, isEffortSettingsOpen, onToggleEffortSettingsOpen, isEffortSettingsDisabled, isRecognitionSupported, isRecording, onToggleRecording, selectedReferenceList, onRemoveReference, onClearAllReferences, attachedImageList, isUploadingImage, onAttachImageFileList, onRemoveImage }) {
     const textareaRef  = useRef(null);
     const fileInputRef = useRef(null);
 
@@ -225,16 +227,10 @@ export default function ChatInput({ inputValue, onInputValueChange, onSend, onSt
                     </button>
                 ) : null}
 
-                {/* LLM 파라미터 프리셋 선택 드롭다운 */}
-                {availablePresetNames && availablePresetNames.length > 0 ? (
-                    <select value={presetName || "MEDIUM"} onChange={(event) => onPresetNameChange(event.target.value)}
-                            title="LLM 파라미터 프리셋 선택 (LOW: 저온도, MEDIUM: 표준, HIGH: 높은 창의성)"
-                            className="shrink-0 px-3 py-2.5 rounded-xl bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition hover:bg-slate-50 dark:hover:bg-slate-900">
-                        {availablePresetNames.map(name => (
-                            <option key={name} value={name}>{name}</option>
-                        ))}
-                    </select>
-                ) : null}
+                {/* 생각 정도 설정 : 드롭다운을 상시 노출하지 않고 톱니바퀴 안으로 넣는다 */}
+                <ReasoningEffortPopover isOpen={isEffortSettingsOpen} onToggleOpen={onToggleEffortSettingsOpen}
+                                        reasoningEffort={reasoningEffort} onReasoningEffortChange={onReasoningEffortChange}
+                                        isDisabled={isEffortSettingsDisabled} />
                 <button onClick={isStreaming ? onStop : onSend}
                         title={isStreaming ? "응답 중단" : "전송"}
                         aria-label={isStreaming ? "응답 중단" : "전송"}
