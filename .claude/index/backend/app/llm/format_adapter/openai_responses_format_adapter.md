@@ -1,0 +1,34 @@
+파일 위치: `C:\Users\kmo97\PycharmProjects\vLLM_Orchestrator_Deep_Agent\backend\app\llm\format_adapter\openai_responses_format_adapter.py`
+
+클래스 기능: `OpenaiResponsesFormatAdapter` - OpenaiResponsesFormatAdapter 클래스
+하위 함수 기능:
+- `__init__()`: 메서드
+- `_append_text_delta()`: 메서드
+- `_append_tool_argument_delta()`: 메서드
+- `_clone_dictionary()`: 메서드
+- `_complete_all_items()`: 메서드
+- `_complete_message()`: 메서드
+- `_complete_message_item()`: 메서드
+- `_complete_tool_item()`: 메서드
+- `_create_message_state()`: 메서드
+- `_create_projection()`: 메서드
+- `_create_response_dictionary()`: 메서드
+- `_create_tool_state()`: 메서드
+- `_extract_ns_path()`: 메서드
+- `_extract_text()`: 메서드
+- `_format_message()`: 메서드
+- `_format_tool_call_list()`: 메서드
+- `_get_message_id()`: 메서드
+- `_get_or_create_message_state()`: 메서드
+- `_get_or_create_tool_state()`: 메서드
+- `_get_timestamp_second_count()`: 메서드
+- `_is_complete_message()`: 메서드
+- `_normalize_usage_dictionary()`: 메서드
+- `_prepare_message()`: 메서드
+- `_resolve_tool_index()`: 메서드
+- `_serialize_argument_value()`: 메서드
+- `format_chunk()`: 메서드
+- `format_end()`: 메서드
+- `format_start()`: 메서드
+- `set_completed_at()`: 메서드
+- `set_source_sequence_number()`: 메서드
